@@ -146,6 +146,12 @@ if (site_sar_available) {
   site_sar_data <- parse_site_sar(params$site_sar_file) |>
     filter(specialty == spec)
   
+  sar_model_label <- if (!is.null(div)) {
+    paste0(spec, " SAR Model (specialty-level, not division-specific)")
+  } else {
+    "Most Recent SAR Results"
+  }
+  
   if (nrow(site_sar_data) > 0) {
     sar_tbl <- site_sar_data |>
       mutate(
@@ -167,7 +173,7 @@ if (site_sar_available) {
       )
     
     kable(sar_tbl, format = "latex", booktabs = TRUE, align = "lrcccclc",
-          caption = paste0(report_name, " — Most Recent SAR Results")) |>
+          caption = paste0(report_name, " — ", sar_model_label)) |>
       kable_styling(latex_options = c("hold_position", "scale_down"),
                     font_size = 8) |>
       column_spec(8, bold = TRUE) |>
@@ -286,9 +292,18 @@ if (!is.null(ot_data)) {
   spec_ot <- ot_data |> filter(specialty == spec)
   
   if (nrow(spec_ot) > 0) {
-    cat("The following charts show historical O/E ratios across SAR periods for\n")
-    cat("complications with available trend data. Red dots indicate periods where\n")
-    cat("the site was flagged as a high outlier.\n\n")
+    
+    # Describe what data is being shown
+    if (!is.null(div)) {
+      cat(paste0("Historical O/E ratios from the **", spec,
+                 "** SAR model (specialty-level; division-specific data not available for ",
+                 div, ").\n\n"))
+    } else {
+      cat("Historical O/E ratios across SAR periods for complications with\n")
+      cat("available trend data.\n\n")
+    }
+    
+    cat("Red dots indicate periods where the site was flagged as a high outlier.\n\n")
     
     # Show trends for complications that had signals or are Needs Improvement
     comps_of_interest <- unique(spec_ot$complication)
