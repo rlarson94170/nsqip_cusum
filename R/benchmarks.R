@@ -7,6 +7,7 @@
 #
 # The site expected rates are the preferred p0 because they account for
 # the complexity of your patient population.
+#
 # =============================================================================
 
 library(tibble)
@@ -24,7 +25,7 @@ COMPLICATIONS <- c(
 # ---- National Observed Rates (January 2026 SAR Summary) --------------------
 
 get_national_rates <- function() {
-  
+
   allcases <- c(
     Mortality = 0.82, Morbidity = 6.51, Cardiac = 0.53,
     Pneumonia = 0.85, `Unplanned Intubation` = 0.44,
@@ -33,7 +34,7 @@ get_national_rates <- function() {
     Sepsis = 0.98, `C.diff Colitis` = 0.21,
     `Unplanned Reoperation` = 2.36, `Unplanned Readmission` = 4.63
   )
-  
+
   spec_rates <- list(
     "General Surgery" = c(
       Mortality = 1.12, Morbidity = 7.53, Cardiac = 0.61,
@@ -68,12 +69,12 @@ get_national_rates <- function() {
       `Unplanned Reoperation` = 3.99, `Unplanned Readmission` = 3.02
     )
   )
-  
+
   rates <- tibble(
     specialty = character(), complication = character(),
     national_rate_pct = numeric(), source = character()
   )
-  
+
   for (spec in names(spec_rates)) {
     for (comp in COMPLICATIONS) {
       rate <- spec_rates[[spec]][comp]
@@ -92,7 +93,7 @@ get_national_rates <- function() {
       }
     }
   }
-  
+
   rates$national_rate <- rates$national_rate_pct / 100
   rates
 }
@@ -102,12 +103,12 @@ get_national_rates <- function() {
 
 #' Parse the Site SAR Summary to extract expected rates and assessments
 parse_site_sar <- function(filepath) {
-  
+
   sheet_map <- c(
     "General" = "General Surgery", "Vascular" = "Vascular",
     "Thoracic" = "Thoracic", "Plastic" = "Plastics"
   )
-  
+
   comp_map <- c(
     "Mortality"              = "Mortality",
     "Morbidity"              = "Morbidity",
@@ -124,9 +125,9 @@ parse_site_sar <- function(filepath) {
     "Unplanned Reoperation"  = "Unplanned Reoperation",
     "Unplanned Readmission"  = "Unplanned Readmission"
   )
-  
+
   all_site_rates <- tibble()
-  
+
   for (sheet_name in names(sheet_map)) {
     spec_name <- sheet_map[sheet_name]
     tryCatch({
@@ -135,7 +136,7 @@ parse_site_sar <- function(filepath) {
         model <- as.character(df$`Model Name`[i])
         if (is.na(model)) next
         if (grepl("^Emergency", model, ignore.case = TRUE)) next
-        
+
         matched_comp <- NA
         for (sar_suffix in names(comp_map)) {
           if (grepl(paste0(sar_suffix, "(\\s*\\(.*\\))?$"), model)) {
@@ -144,7 +145,7 @@ parse_site_sar <- function(filepath) {
           }
         }
         if (is.na(matched_comp)) next
-        
+
         all_site_rates <- bind_rows(all_site_rates, tibble(
           specialty        = spec_name,
           complication     = matched_comp,
@@ -167,21 +168,21 @@ parse_site_sar <- function(filepath) {
       message("  Warning: could not read sheet '", sheet_name, "': ", e$message)
     })
   }
-  
+
   all_site_rates
 }
 
 
 #' Parse the Over-Time sheet for O/E trend data
 parse_over_time <- function(filepath) {
-  
+
   df <- read_excel(filepath, sheet = "Over-Time")
-  
+
   spec_prefixes <- c(
     "GEN " = "General Surgery", "VASC " = "Vascular",
     "THOR " = "Thoracic", "PLAST " = "Plastics"
   )
-  
+
   comp_suffixes <- c(
     "Mortality" = "Mortality", "Morbidity" = "Morbidity",
     "Cardiac" = "Cardiac", "Pneumonia" = "Pneumonia",
@@ -193,25 +194,25 @@ parse_over_time <- function(filepath) {
     "Unplanned Reoperation" = "Unplanned Reoperation",
     "Unplanned Readmission" = "Unplanned Readmission"
   )
-  
+
   results <- tibble()
-  
+
   for (i in seq_len(nrow(df))) {
     model <- as.character(df$Model[i])
     if (is.na(model)) next
-    
+
     matched_spec <- NA
     for (pfx in names(spec_prefixes)) {
       if (startsWith(model, pfx)) { matched_spec <- spec_prefixes[pfx]; break }
     }
     if (is.na(matched_spec)) next
-    
+
     matched_comp <- NA
     for (sfx in names(comp_suffixes)) {
       if (endsWith(model, sfx)) { matched_comp <- comp_suffixes[sfx]; break }
     }
     if (is.na(matched_comp)) next
-    
+
     period_cols <- names(df)[names(df) != "Model"]
     for (pc in period_cols) {
       val_raw <- as.character(df[[pc]][i])
@@ -220,7 +221,7 @@ parse_over_time <- function(filepath) {
       is_low  <- grepl("L$", val_raw)
       val_num <- suppressWarnings(as.numeric(gsub("[HL]$", "", val_raw)))
       if (is.na(val_num)) next
-      
+
       results <- bind_rows(results, tibble(
         specialty = matched_spec, complication = matched_comp,
         period = pc, oe_ratio = val_num,
@@ -228,7 +229,7 @@ parse_over_time <- function(filepath) {
       ))
     }
   }
-  
+
   results
 }
 
@@ -239,9 +240,9 @@ parse_over_time <- function(filepath) {
 #' @param benchmark_type "site_expected" (preferred) or "national_observed"
 get_benchmark_rates <- function(site_sar_path = NULL,
                                 benchmark_type = "site_expected") {
-  
+
   national <- get_national_rates()
-  
+
   if (is.null(site_sar_path) || benchmark_type == "national_observed") {
     rates <- national |>
       transmute(
@@ -255,9 +256,9 @@ get_benchmark_rates <- function(site_sar_path = NULL,
       )
     return(rates)
   }
-  
+
   site_rates <- parse_site_sar(site_sar_path)
-  
+
   rates <- national |>
     left_join(
       site_rates |> select(
@@ -277,6 +278,6 @@ get_benchmark_rates <- function(site_sar_path = NULL,
         paste0("National observed (", source, ")")
       )
     )
-  
+
   rates
 }
