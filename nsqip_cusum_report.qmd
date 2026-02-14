@@ -1,0 +1,369 @@
+---
+title: "NSQIP CUSUM Outcome Monitoring Report"
+subtitle: "`r if (nchar(params$division) > 0) paste0(params$specialty, ' \\u2014 ', params$division) else params$specialty`"
+author: "Surgical Quality Improvement"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+format:
+  pdf:
+    toc: true
+    toc-depth: 2
+    number-sections: false
+    geometry:
+      - margin=0.75in
+    fontsize: 10pt
+    header-includes:
+      - \usepackage{fancyhdr}
+      - \pagestyle{fancy}
+      - \fancyhead[L]{NSQIP CUSUM Monitoring}
+      - \fancyhead[R]{\nouppercase{\leftmark}}
+      - \fancyfoot[C]{\thepage}
+      - \usepackage{float}
+      - \floatplacement{figure}{H}
+      - \usepackage{colortbl}
+      - \definecolor{sigred}{HTML}{CB181D}
+      - \definecolor{okgreen}{HTML}{238B45}
+params:
+  specialty: "General Surgery"
+  division: ""
+  data_file: "data/Case_Details_Report.xlsx"
+  site_sar_file: "data/SAR_Site_Summary.xlsx"
+  surgeon_mapping_file: "data/surgeon_division_mapping.csv"
+  benchmark_type: "site_expected"
+  odds_ratio: 2.0
+  target_arl: 500
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+
+source("R/benchmarks.R")
+source("R/data_processing.R")
+source("R/cusum_functions.R")
+
+library(knitr)
+library(kableExtra)
+
+options(readxl.show_progress = FALSE)
+```
+
+```{r load-data}
+#| include: false
+
+case_data <- process_case_details(
+  filepath    = params$data_file,
+  specialties = c("General Surgery", "Vascular", "Thoracic", "Plastics")
+)
+
+# Load surgeon mapping and assign divisions
+mapping_file <- params$surgeon_mapping_file
+if (nchar(mapping_file) > 0 && file.exists(mapping_file)) {
+  surgeon_map <- load_surgeon_mapping(mapping_file)
+  case_data <- assign_divisions(case_data, surgeon_map)
+} else {
+  case_data$division <- NA_character_
+}
+
+# Determine if site SAR is available
+site_sar_available <- nchar(params$site_sar_file) > 0 && file.exists(params$site_sar_file)
+
+benchmark_rates <- get_benchmark_rates(
+  site_sar_path  = if (site_sar_available) params$site_sar_file else NULL,
+  benchmark_type = params$benchmark_type
+)
+
+# Load over-time data if available
+ot_data <- NULL
+if (site_sar_available) {
+  ot_data <- tryCatch(parse_over_time(params$site_sar_file), error = function(e) NULL)
+}
+
+spec <- params$specialty
+div  <- if (nchar(params$division) > 0) params$division else NULL
+
+# Filter to this specialty (and division if specified)
+spec_data <- case_data |> filter(specialty == spec)
+if (!is.null(div)) {
+  spec_data <- spec_data |> filter(division == div)
+}
+
+n_cases  <- nrow(spec_data)
+date_min <- min(spec_data$op_date, na.rm = TRUE)
+date_max <- max(spec_data$op_date, na.rm = TRUE)
+
+# Display name for titles
+report_name <- if (!is.null(div)) paste0(spec, " — ", div) else spec
+
+# Benchmark description for text
+bench_desc <- if (params$benchmark_type == "site_expected" && site_sar_available) {
+  "site-specific risk-adjusted expected rates from the most recent SAR/ISAR"
+} else {
+  "national observed rates from the most recent SAR"
+}
+```
+
+\newpage
+
+# Overview
+
+This report presents Bernoulli CUSUM charts for monitoring surgical outcomes
+in **`r report_name`** using site-level NSQIP case data.
+
+**Report period:** `r format(date_min, "%B %d, %Y")` to `r format(date_max, "%B %d, %Y")`
+\
+**Total cases:** `r n_cases`
+`r if (!is.null(div)) paste0("\\\\\n**Division:** ", div, " (within ", spec, ")")` 
+\
+**Benchmark:** `r bench_desc`
+
+## Methodology
+
+Each chart tracks one complication using a Bernoulli CUSUM:
+
+- **p~0~ (benchmark rate):** `r if (params$benchmark_type == "site_expected") "Risk-adjusted expected rate for this site's case mix, derived from the SAR hierarchical model. Where unavailable, the national observed rate is used." else "National observed rate for this specialty from the SAR."``r if (!is.null(div)) " Note: benchmarks reflect the overall specialty model, not division-specific case mix."`
+- **p~1~ (detection target):** Rate corresponding to an odds ratio of
+  `r params$odds_ratio`$\times$ relative to p~0~.
+- **h (decision boundary):** Calibrated for ARL~0~ $\approx$ `r params$target_arl`.
+- **Signal ($\blacktriangle$):** CUSUM crossed h; chart resets to zero.
+- **Events (|):** Orange tick marks show individual complication occurrences.
+- **Title color:** \textcolor{sigred}{Red} = SAR "Needs Improvement";
+  \textcolor{okgreen}{Green} = SAR "Exemplary"; Black = "As Expected" or no SAR model.
+
+**Key limitations:** `r if (params$benchmark_type == "site_expected") "While the benchmark rates are risk-adjusted, the CUSUM chart itself monitors the raw (unadjusted) event stream against those expected rates. Changes in case mix during the monitoring period are not dynamically accounted for." else "These charts use unadjusted rates. Case mix differences from the national average will affect interpretation."``r if (!is.null(div)) " Division-level reports use the overall specialty benchmark; case mix within a division may differ substantially from the specialty average."` PATOS exclusions are applied per SAR methodology. Intended for internal QI monitoring, not formal profiling.
+
+\newpage
+
+# SAR Context — Prior Performance
+
+```{r sar-context-table}
+#| results: asis
+
+if (site_sar_available) {
+  
+  site_sar_data <- parse_site_sar(params$site_sar_file) |>
+    filter(specialty == spec)
+  
+  if (nrow(site_sar_data) > 0) {
+    sar_tbl <- site_sar_data |>
+      mutate(
+        obs_pct = round(observed_rate_sar * 100, 2),
+        exp_pct = round(expected_rate * 100, 2),
+        oe      = round(odds_ratio_sar, 2),
+        ci      = paste0("(", round(ci_lower, 2), "–", round(ci_upper, 2), ")"),
+        pctl    = round(adj_percentile)
+      ) |>
+      select(
+        Complication  = complication,
+        `N (SAR)`     = n_cases_sar,
+        `Obs %`       = obs_pct,
+        `Exp %`       = exp_pct,
+        `O/E`         = oe,
+        `95% CI`      = ci,
+        Pctl          = pctl,
+        Assessment    = assessment
+      )
+    
+    kable(sar_tbl, format = "latex", booktabs = TRUE, align = "lrcccclc",
+          caption = paste0(report_name, " — Most Recent SAR Results")) |>
+      kable_styling(latex_options = c("hold_position", "scale_down"),
+                    font_size = 8) |>
+      column_spec(8, bold = TRUE) |>
+      print()
+    
+    cat("\n\n")
+    
+    # Count needs improvement
+    n_ni <- sum(site_sar_data$assessment == "Needs Improvement", na.rm = TRUE)
+    n_ex <- sum(site_sar_data$assessment == "Exemplary", na.rm = TRUE)
+    
+    if (n_ni > 0) {
+      ni_comps <- site_sar_data |>
+        filter(assessment == "Needs Improvement") |>
+        pull(complication)
+      cat(paste0("**Needs Improvement (", n_ni, "):** ",
+                 paste(ni_comps, collapse = ", "), "\n\n"))
+    }
+    if (n_ex > 0) {
+      ex_comps <- site_sar_data |>
+        filter(assessment == "Exemplary") |>
+        pull(complication)
+      cat(paste0("**Exemplary (", n_ex, "):** ",
+                 paste(ex_comps, collapse = ", "), "\n\n"))
+    }
+    
+  } else {
+    cat("No site SAR data available for this specialty.\n\n")
+  }
+} else {
+  cat("Site SAR file not provided. Using national benchmarks only.\n\n")
+}
+```
+
+\newpage
+
+# Current Observed Rates vs. Benchmarks
+
+```{r summary-table}
+obs_summary <- observed_rates_summary(case_data, spec, div)
+
+bench_for_spec <- benchmark_rates |>
+  filter(specialty == spec) |>
+  select(complication, p0_pct, benchmark_source, national_rate_pct)
+
+summary_tbl <- obs_summary |>
+  left_join(bench_for_spec, by = "complication") |>
+  mutate(
+    benchmark_pct = round(p0_pct, 2),
+    ratio = ifelse(p0_pct > 0, round(observed_rate_pct / p0_pct, 2), NA),
+    bench_type = ifelse(grepl("Site", benchmark_source), "Site Exp", "National")
+  ) |>
+  select(
+    Complication   = complication,
+    `N`            = n_cases,
+    Events         = n_events,
+    `Obs %`        = observed_rate_pct,
+    `Benchmark %`  = benchmark_pct,
+    `O/B`          = ratio,
+    Type           = bench_type
+  )
+
+kable(summary_tbl, format = "latex", booktabs = TRUE, align = "lrrcccl",
+      caption = paste0("Current Observed vs. Benchmark — ", report_name)) |>
+  kable_styling(latex_options = c("hold_position", "scale_down"),
+                font_size = 9) |>
+  footnote(
+    general = "O/B = Observed/Benchmark ratio. Type: Site Exp = risk-adjusted expected rate; National = national observed rate.",
+    general_title = "", footnote_as_chunk = TRUE
+  )
+```
+
+\newpage
+
+# CUSUM Charts
+
+```{r generate-charts}
+#| results: hide
+
+charts <- generate_specialty_charts(
+  data       = case_data,
+  spec       = spec,
+  rates      = benchmark_rates,
+  odds_ratio = params$odds_ratio,
+  div        = div
+)
+```
+
+```{r display-charts}
+#| fig.width: 7.5
+#| fig.height: 3.5
+#| out.width: "100%"
+#| results: asis
+
+if (length(charts) == 0) {
+  cat("No charts generated for this specialty.\n")
+} else {
+  for (i in seq_along(charts)) {
+    print(charts[[i]])
+    cat("\n\n")
+  }
+}
+```
+
+\newpage
+
+# O/E Trends Across SAR Periods
+
+```{r oe-trends}
+#| fig.width: 7.5
+#| fig.height: 2.5
+#| out.width: "100%"
+#| results: asis
+
+if (!is.null(ot_data)) {
+  spec_ot <- ot_data |> filter(specialty == spec)
+  
+  if (nrow(spec_ot) > 0) {
+    cat("The following charts show historical O/E ratios across SAR periods for\n")
+    cat("complications with available trend data. Red dots indicate periods where\n")
+    cat("the site was flagged as a high outlier.\n\n")
+    
+    # Show trends for complications that had signals or are Needs Improvement
+    comps_of_interest <- unique(spec_ot$complication)
+    
+    # Prioritize: show Needs Improvement and any with high outlier history
+    ni_comps <- benchmark_rates |>
+      filter(specialty == spec, assessment == "Needs Improvement") |>
+      pull(complication)
+    
+    high_outlier_comps <- spec_ot |>
+      filter(is_outlier_high) |>
+      pull(complication) |>
+      unique()
+    
+    priority_comps <- unique(c(ni_comps, high_outlier_comps))
+    
+    if (length(priority_comps) > 0) {
+      for (comp in priority_comps) {
+        comp_ot <- spec_ot |> filter(complication == comp) |> arrange(period)
+        if (nrow(comp_ot) >= 2) {
+          trend_plot <- plot_oe_trend(comp_ot, comp)
+          if (!is.null(trend_plot)) {
+            print(trend_plot)
+            cat("\n\n")
+          }
+        }
+      }
+    } else {
+      cat("No complications flagged as Needs Improvement or high outlier in trend data.\n\n")
+    }
+  } else {
+    cat("No over-time data available for this specialty.\n\n")
+  }
+} else {
+  cat("Site SAR not provided; over-time trends unavailable.\n\n")
+}
+```
+
+\newpage
+
+# Appendix: Case Mix Summary
+
+```{r case-mix}
+asa_summary <- spec_data |>
+  count(asa_class, name = "n") |>
+  mutate(pct = round(n / sum(n) * 100, 1)) |>
+  arrange(asa_class)
+
+kable(asa_summary, format = "latex", booktabs = TRUE,
+      col.names = c("ASA Classification", "N", "%"),
+      caption = paste0("ASA Distribution — ", report_name)) |>
+  kable_styling(latex_options = "hold_position", font_size = 9)
+```
+
+```{r monthly-volume}
+#| fig.width: 7
+#| fig.height: 2.5
+#| out.width: "100%"
+
+monthly <- spec_data |>
+  mutate(month = floor_date(op_date, "month")) |>
+  count(month, name = "cases")
+
+ggplot(monthly, aes(x = month, y = cases)) +
+  geom_col(fill = "#4292c6", width = 25) +
+  geom_text(aes(label = cases), vjust = -0.3, size = 2.5) +
+  scale_x_date(date_labels = "%b\n%Y", date_breaks = "1 month") +
+  labs(title = paste0("Monthly Case Volume — ", report_name),
+       x = NULL, y = "Cases") +
+  theme_minimal(base_size = 9) +
+  theme(panel.grid.minor = element_blank())
+```
+
+---
+
+*Report generated `r format(Sys.time(), "%Y-%m-%d %H:%M")` | NSQIP CUSUM Monitoring System v1.2*
+\
+*Benchmark: `r bench_desc``r if (!is.null(div)) paste0(" | Division: ", div)`*
