@@ -68,6 +68,9 @@ if (nchar(mapping_file) > 0 && file.exists(mapping_file)) {
   case_data$division <- NA_character_
 }
 
+# Classify procedures
+case_data <- assign_procedure_categories(case_data)
+
 # Determine if site SAR is available
 site_sar_available <- nchar(params$site_sar_file) > 0 && file.exists(params$site_sar_file)
 
@@ -80,6 +83,12 @@ benchmark_rates <- get_benchmark_rates(
 ot_data <- NULL
 if (site_sar_available) {
   ot_data <- tryCatch(parse_over_time(params$site_sar_file), error = function(e) NULL)
+}
+
+# Load targeted SAR data if available
+targeted_data <- NULL
+if (site_sar_available) {
+  targeted_data <- tryCatch(parse_targeted_sar(params$site_sar_file), error = function(e) NULL)
 }
 
 spec <- params$specialty
@@ -376,6 +385,113 @@ ggplot(monthly, aes(x = month, y = cases)) +
        x = NULL, y = "Cases") +
   theme_minimal(base_size = 9) +
   theme(panel.grid.minor = element_blank())
+```
+
+---
+
+\newpage
+
+# Appendix: Procedure Mix Profile
+
+```{r procedure-mix}
+#| results: asis
+
+proc_mix <- build_procedure_mix(case_data, spec, div)
+
+if (!is.null(proc_mix) && nrow(proc_mix) > 0) {
+  
+  cat(paste0(
+    "Procedure categories based on NSQIP targeted module flags and CPT codes. ",
+    "Complication rate reflects any individual occurrence (PATOS excluded); ",
+    "morbidity composite is not counted separately.\n\n"
+  ))
+  
+  kable(proc_mix, format = "latex", booktabs = TRUE,
+        align = c("l","r","r","r","r","r"),
+        caption = paste0("Procedure Mix — ", report_name)) |>
+    kable_styling(latex_options = "hold_position", font_size = 8) |>
+    print()
+  
+} else {
+  cat("Procedure mix data not available.\n\n")
+}
+```
+
+```{r targeted-sar}
+#| results: asis
+
+if (!is.null(targeted_data)) {
+  
+  tgt_summary <- build_targeted_summary(targeted_data, case_data, spec, div)
+  div_proc_rates <- build_division_procedure_rates(
+    case_data, spec, div, targeted_data
+  )
+  
+  if ((!is.null(tgt_summary) && nrow(tgt_summary) > 0) ||
+      !is.null(div_proc_rates)) {
+    
+    cat("\\newpage\n\n")
+    cat("# Appendix: Targeted Procedure Benchmarks (SAR)\n\n")
+    
+    scope_note <- if (!is.null(div)) {
+      paste0(
+        "Procedure-specific outcomes for the **", div,
+        "** division compared against site-level targeted SAR benchmarks. ",
+        "SAR benchmarks reflect all cases across the entire site (not just this division) ",
+        "and are risk-adjusted. Division observed rates are unadjusted."
+      )
+    } else {
+      paste0(
+        "Site-level targeted SAR benchmarks for procedure types with dedicated ",
+        "NSQIP models. Division observed rates shown alongside for comparison."
+      )
+    }
+    cat(scope_note, "\n\n")
+    
+    # Render one section per targeted procedure
+    for (proc in unique(tgt_summary$Procedure)) {
+      
+      # Site-level SAR benchmarks for this procedure
+      proc_sar <- tgt_summary |> filter(Procedure == proc) |> select(-Procedure)
+      
+      # Division-level observed rates (if available)
+      proc_div <- div_proc_rates[[proc]]
+      
+      if (!is.null(proc_div)) {
+        # Merge: division rates alongside SAR benchmarks
+        merged <- proc_sar |>
+          left_join(
+            proc_div |> select(Complication, `Div N` = N,
+                               `Div Events` = Events, `Div Obs %` = `Obs %`),
+            by = "Complication"
+          )
+        
+        kable(merged, format = "latex", booktabs = TRUE,
+              align = c("l","r","r","r","r","r","l","r","r","r"),
+              caption = paste0("Targeted: ", proc,
+                               " — ", report_name, " vs. Site SAR")) |>
+          kable_styling(latex_options = c("hold_position", "scale_down"),
+                        font_size = 7) |>
+          add_header_above(c(" " = 1,
+                             "Site-Level SAR (Risk-Adjusted)" = 6,
+                             "Division (Unadjusted)" = 3)) |>
+          print()
+      } else {
+        # No division cases — show site SAR only
+        kable(proc_sar, format = "latex", booktabs = TRUE,
+              align = c("l","r","r","r","r","r","l"),
+              caption = paste0("Targeted: ", proc,
+                               " — Site-Level SAR Results")) |>
+          kable_styling(latex_options = c("hold_position", "scale_down"),
+                        font_size = 8) |>
+          print()
+      }
+      
+      cat("\n\n")
+    }
+    
+  }
+}
 ```
 
 ---

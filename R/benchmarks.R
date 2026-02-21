@@ -7,7 +7,6 @@
 #
 # The site expected rates are the preferred p0 because they account for
 # the complexity of your patient population.
-#
 # =============================================================================
 
 library(tibble)
@@ -25,7 +24,7 @@ COMPLICATIONS <- c(
 # ---- National Observed Rates (January 2026 SAR Summary) --------------------
 
 get_national_rates <- function() {
-
+  
   allcases <- c(
     Mortality = 0.82, Morbidity = 6.51, Cardiac = 0.53,
     Pneumonia = 0.85, `Unplanned Intubation` = 0.44,
@@ -34,7 +33,7 @@ get_national_rates <- function() {
     Sepsis = 0.98, `C.diff Colitis` = 0.21,
     `Unplanned Reoperation` = 2.36, `Unplanned Readmission` = 4.63
   )
-
+  
   spec_rates <- list(
     "General Surgery" = c(
       Mortality = 1.12, Morbidity = 7.53, Cardiac = 0.61,
@@ -69,12 +68,12 @@ get_national_rates <- function() {
       `Unplanned Reoperation` = 3.99, `Unplanned Readmission` = 3.02
     )
   )
-
+  
   rates <- tibble(
     specialty = character(), complication = character(),
     national_rate_pct = numeric(), source = character()
   )
-
+  
   for (spec in names(spec_rates)) {
     for (comp in COMPLICATIONS) {
       rate <- spec_rates[[spec]][comp]
@@ -93,7 +92,7 @@ get_national_rates <- function() {
       }
     }
   }
-
+  
   rates$national_rate <- rates$national_rate_pct / 100
   rates
 }
@@ -103,12 +102,12 @@ get_national_rates <- function() {
 
 #' Parse the Site SAR Summary to extract expected rates and assessments
 parse_site_sar <- function(filepath) {
-
+  
   sheet_map <- c(
     "General" = "General Surgery", "Vascular" = "Vascular",
     "Thoracic" = "Thoracic", "Plastic" = "Plastics"
   )
-
+  
   comp_map <- c(
     "Mortality"              = "Mortality",
     "Morbidity"              = "Morbidity",
@@ -125,9 +124,9 @@ parse_site_sar <- function(filepath) {
     "Unplanned Reoperation"  = "Unplanned Reoperation",
     "Unplanned Readmission"  = "Unplanned Readmission"
   )
-
+  
   all_site_rates <- tibble()
-
+  
   for (sheet_name in names(sheet_map)) {
     spec_name <- sheet_map[sheet_name]
     tryCatch({
@@ -136,7 +135,7 @@ parse_site_sar <- function(filepath) {
         model <- as.character(df$`Model Name`[i])
         if (is.na(model)) next
         if (grepl("^Emergency", model, ignore.case = TRUE)) next
-
+        
         matched_comp <- NA
         for (sar_suffix in names(comp_map)) {
           if (grepl(paste0(sar_suffix, "(\\s*\\(.*\\))?$"), model)) {
@@ -145,7 +144,7 @@ parse_site_sar <- function(filepath) {
           }
         }
         if (is.na(matched_comp)) next
-
+        
         all_site_rates <- bind_rows(all_site_rates, tibble(
           specialty        = spec_name,
           complication     = matched_comp,
@@ -168,21 +167,21 @@ parse_site_sar <- function(filepath) {
       message("  Warning: could not read sheet '", sheet_name, "': ", e$message)
     })
   }
-
+  
   all_site_rates
 }
 
 
 #' Parse the Over-Time sheet for O/E trend data
 parse_over_time <- function(filepath) {
-
+  
   df <- read_excel(filepath, sheet = "Over-Time")
-
+  
   spec_prefixes <- c(
     "GEN " = "General Surgery", "VASC " = "Vascular",
     "THOR " = "Thoracic", "PLAST " = "Plastics"
   )
-
+  
   comp_suffixes <- c(
     "Mortality" = "Mortality", "Morbidity" = "Morbidity",
     "Cardiac" = "Cardiac", "Pneumonia" = "Pneumonia",
@@ -194,25 +193,25 @@ parse_over_time <- function(filepath) {
     "Unplanned Reoperation" = "Unplanned Reoperation",
     "Unplanned Readmission" = "Unplanned Readmission"
   )
-
+  
   results <- tibble()
-
+  
   for (i in seq_len(nrow(df))) {
     model <- as.character(df$Model[i])
     if (is.na(model)) next
-
+    
     matched_spec <- NA
     for (pfx in names(spec_prefixes)) {
       if (startsWith(model, pfx)) { matched_spec <- spec_prefixes[pfx]; break }
     }
     if (is.na(matched_spec)) next
-
+    
     matched_comp <- NA
     for (sfx in names(comp_suffixes)) {
       if (endsWith(model, sfx)) { matched_comp <- comp_suffixes[sfx]; break }
     }
     if (is.na(matched_comp)) next
-
+    
     period_cols <- names(df)[names(df) != "Model"]
     for (pc in period_cols) {
       val_raw <- as.character(df[[pc]][i])
@@ -221,7 +220,7 @@ parse_over_time <- function(filepath) {
       is_low  <- grepl("L$", val_raw)
       val_num <- suppressWarnings(as.numeric(gsub("[HL]$", "", val_raw)))
       if (is.na(val_num)) next
-
+      
       results <- bind_rows(results, tibble(
         specialty = matched_spec, complication = matched_comp,
         period = pc, oe_ratio = val_num,
@@ -229,7 +228,7 @@ parse_over_time <- function(filepath) {
       ))
     }
   }
-
+  
   results
 }
 
@@ -240,9 +239,9 @@ parse_over_time <- function(filepath) {
 #' @param benchmark_type "site_expected" (preferred) or "national_observed"
 get_benchmark_rates <- function(site_sar_path = NULL,
                                 benchmark_type = "site_expected") {
-
+  
   national <- get_national_rates()
-
+  
   if (is.null(site_sar_path) || benchmark_type == "national_observed") {
     rates <- national |>
       transmute(
@@ -256,9 +255,9 @@ get_benchmark_rates <- function(site_sar_path = NULL,
       )
     return(rates)
   }
-
+  
   site_rates <- parse_site_sar(site_sar_path)
-
+  
   rates <- national |>
     left_join(
       site_rates |> select(
@@ -278,6 +277,172 @@ get_benchmark_rates <- function(site_sar_path = NULL,
         paste0("National observed (", source, ")")
       )
     )
-
+  
   rates
+}
+
+# =============================================================================
+# Targeted SAR Parsing
+# =============================================================================
+
+# Map targeted sheet names to specialty names
+TARGETED_SHEET_MAP <- c(
+  "Targeted-General"    = "General Surgery",
+  "Targeted-Vascular"   = "Vascular",
+  "Targeted-Thoracic"   = "Thoracic",
+  "Targeted-Plastic"    = "Plastics"
+)
+
+# Map targeted procedure names (from SAR model names) to procedure categories
+# (matching the categories in data_processing.R)
+TARGETED_PROC_MAP <- c(
+  "Colectomy"              = "Colectomy",
+  "Proctectomy"            = "Proctectomy",
+  "VHR"                    = "Ventral Hernia Repair",
+  "Major Hepatectomy"      = "Hepatectomy",
+  "Partial Hepatectomy"    = "Hepatectomy",
+  "Distal Pancreatectomy"  = "Pancreatectomy",
+  "Whipple Pancreatectomy" = "Pancreatectomy",
+  "Esophagectomy"          = "Esophagectomy",
+  "Lung Resection"         = "Lung Resection",
+  "Flap"                   = "Flap"
+)
+
+
+#' Parse Targeted SAR data from the Site Summary file
+#'
+#' @param sar_file Path to SAR_Site_Summary.xlsx
+#' @return A tibble with targeted procedure benchmark data
+parse_targeted_sar <- function(sar_file) {
+  
+  if (is.null(sar_file) || !file.exists(sar_file)) return(NULL)
+  
+  sheets <- readxl::excel_sheets(sar_file)
+  results <- list()
+  
+  for (sheet_name in names(TARGETED_SHEET_MAP)) {
+    if (!(sheet_name %in% sheets)) next
+    spec <- TARGETED_SHEET_MAP[sheet_name]
+    
+    raw <- readxl::read_excel(sar_file, sheet = sheet_name)
+    if (nrow(raw) == 0 || !("Model Name" %in% names(raw))) next
+    
+    for (i in seq_len(nrow(raw))) {
+      model <- raw$`Model Name`[i]
+      if (is.na(model)) next
+      
+      # Skip emergency sub-models
+      if (grepl("^Emergency ", model)) next
+      
+      # Parse: remove prefix patterns like "T GEN ", "T THOR ", "GEN ", "VASC "
+      # Only strip known specialty abbreviation prefixes
+      clean <- model
+      # Pattern 1: "T <SPEC> " (targeted with specialty)
+      if (grepl("^T\\s+[A-Z]+\\s+", clean)) {
+        clean <- sub("^T\\s+[A-Z]+\\s+", "", clean)
+      } else {
+        # Pattern 2: "GEN ", "VASC ", "THOR ", "PLAST " (LOS-only models)
+        clean <- sub("^(GEN|VASC|THOR|PLAST|NSG|ORTHO|GYN|OB|URO)\\s+", "", clean)
+      }
+      
+      # Match known complications from the end
+      known_comps <- c("Mortality", "Morbidity", "Cardiac", "Pneumonia",
+                       "Unplanned Intubation", "Ventilator > 48 Hours",
+                       "VTE", "Renal Failure", "UTI", "SSI", "Sepsis",
+                       "C.diff Colitis", "Unplanned Reoperation",
+                       "Unplanned Readmission", "Length of Stay",
+                       "Anastomotic Leak", "Prolonged NPO/NGT Use")
+      
+      proc_name <- clean
+      comp_name <- NA_character_
+      for (comp in known_comps) {
+        if (endsWith(clean, comp)) {
+          proc_name <- trimws(sub(paste0(comp, "$"), "", clean))
+          comp_name <- comp
+          break
+        }
+      }
+      
+      # Map to our procedure categories
+      proc_cat <- if (proc_name %in% names(TARGETED_PROC_MAP)) {
+        TARGETED_PROC_MAP[proc_name]
+      } else {
+        proc_name
+      }
+      
+      results[[length(results) + 1]] <- tibble(
+        specialty          = spec,
+        targeted_procedure = proc_name,
+        procedure_category = as.character(proc_cat),
+        complication       = comp_name,
+        n_cases            = as.integer(raw$`Total Cases`[i]),
+        obs_rate           = as.numeric(raw$`Observed Rate`[i]),
+        exp_rate           = as.numeric(raw$`Expected Rate`[i]),
+        odds_ratio         = as.numeric(raw$`Odds Ratio`[i]),
+        percentile         = as.numeric(raw$`Adjusted Percentile`[i]),
+        assessment         = as.character(raw$`Assessment`[i])
+      )
+    }
+  }
+  
+  if (length(results) == 0) return(NULL)
+  bind_rows(results)
+}
+
+
+#' Build targeted SAR summary for a specific division
+#'
+#' Filters targeted SAR data to procedures that the division actually performs,
+#' based on the case data.
+#'
+#' @param targeted_data Parsed targeted SAR (from parse_targeted_sar)
+#' @param case_data Case data with procedure_category and division columns
+#' @param spec Specialty
+#' @param div Division name (NULL for specialty-level report)
+#' @return A formatted tibble for display, or NULL
+build_targeted_summary <- function(targeted_data, case_data, spec, div = NULL) {
+  
+  if (is.null(targeted_data)) return(NULL)
+  
+  # Filter targeted data to this specialty
+  td <- targeted_data |> filter(specialty == spec)
+  if (nrow(td) == 0) return(NULL)
+  
+  # Determine which procedure categories this division actually does
+  df <- case_data |> filter(specialty == spec)
+  if (!is.null(div) && nchar(div) > 0) {
+    df <- df |> filter(division == div)
+  }
+  if (nrow(df) == 0) return(NULL)
+  
+  # Count cases per procedure category in our data
+  div_procs <- df |>
+    count(procedure_category, name = "div_cases") |>
+    filter(div_cases >= 1)
+  
+  # Match targeted procedures to what the division does
+  relevant <- td |>
+    filter(procedure_category %in% div_procs$procedure_category) |>
+    left_join(div_procs, by = "procedure_category")
+  
+  if (nrow(relevant) == 0) return(NULL)
+  
+  # Format for display
+  relevant |>
+    mutate(
+      obs_pct = round(obs_rate * 100, 2),
+      exp_pct = round(exp_rate * 100, 2),
+      oe      = round(odds_ratio, 2),
+      pctl    = round(percentile)
+    ) |>
+    transmute(
+      Procedure    = targeted_procedure,
+      Complication  = complication,
+      `N (SAR)`    = n_cases,
+      `Obs %`      = obs_pct,
+      `Exp %`      = exp_pct,
+      `O/E`        = oe,
+      Pctl         = pctl,
+      Assessment   = assessment
+    )
 }

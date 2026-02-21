@@ -62,6 +62,20 @@ process_case_details <- function(
       readmit_related   = as.integer(as.numeric(`# of Readmissions likely related to Primary Procedure`) > 0),
       readmit_unrelated = as.integer(as.numeric(`# of Readmissions likely unrelated to Primary Procedure`) > 0),
       
+      # NSQIP Targeted procedure module flags (used for procedure classification)
+      colectomy_flag   = as.integer(!is.na(`Colectomy Primary Indication for Surgery`)),
+      proctectomy_flag = as.integer(!is.na(`Proctectomy Preop Patient Marked for Stoma`)),
+      
+      # Targeted procedure-specific complications
+      anastomotic_leak = as.integer(
+        grepl("^Leak", `Colectomy Postop Anastomotic Leak`, ignore.case = TRUE) |
+        grepl("^Leak", `Proctectomy Postop Anastomotic Leak`, ignore.case = TRUE)
+      ),
+      prolonged_npo = as.integer(
+        `Colectomy Prolonged Postoperative NPO or NGT Use` == "Yes" |
+        `Proctectomy Prolonged Postoperative NPO or NGT Use` == "Yes"
+      ),
+      
       # ---- Individual complication indicators ----
       
       # 1. Mortality: 30-day death
@@ -162,6 +176,7 @@ process_case_details <- function(
     select(
       case_id, lmrn, op_date, specialty, surgeon, cpt_code, cpt_desc,
       age, asa_class, los, readmit_related, readmit_unrelated,
+      colectomy_flag, proctectomy_flag, anastomotic_leak, prolonged_npo,
       mortality, morbidity, cardiac, pneumonia, unplanned_intubation,
       vent48, vte, renal_failure, uti, ssi, sepsis, cdiff,
       unplanned_reop, unplanned_readmit
@@ -172,7 +187,8 @@ process_case_details <- function(
     "mortality", "morbidity", "cardiac", "pneumonia", "unplanned_intubation",
     "vent48", "vte", "renal_failure", "uti", "ssi", "sepsis", "cdiff",
     "unplanned_reop", "unplanned_readmit",
-    "readmit_related", "readmit_unrelated"
+    "readmit_related", "readmit_unrelated",
+    "anastomotic_leak", "prolonged_npo"
   )
   processed <- processed |>
     mutate(across(all_of(complication_cols), ~replace_na(., 0L)))
@@ -442,4 +458,214 @@ build_complication_caselist <- function(data, spec, div = NULL, months = 3) {
     )
   
   result
+}
+
+
+# =============================================================================
+# Procedure Classification
+# =============================================================================
+
+# CPT-based procedure category definitions for General Surgery
+# NSQIP targeted flags (colectomy_flag, proctectomy_flag) take precedence
+PROCEDURE_CPT_MAP <- list(
+  "Appendectomy"               = c(44950, 44960, 44970),
+  "Cholecystectomy"            = c(47562, 47563, 47564, 47600, 47605, 47610),
+  "Breast"                     = c(19120, 19125, 19301, 19302, 19303, 19304,
+                                   19305, 19306, 19307),
+  "Thyroid/Parathyroid"        = c(60210, 60220, 60225, 60240, 60252, 60254,
+                                   60260, 60270, 60271, 60500, 60502),
+  "Adrenalectomy"              = c(60650),
+  "Pancreatectomy"             = c(48140, 48145, 48146, 48148, 48150, 48152,
+                                   48153, 48154, 48155),
+  "Hepatectomy"                = c(47120, 47122, 47125, 47130),
+  "Bariatric"                  = c(43644, 43645, 43775, 43659, 43770, 43771,
+                                   43842, 43843, 43845, 43846),
+  "Ventral Hernia Repair"      = c(49591, 49592, 49593, 49594, 49595, 49596,
+                                   49613, 49614, 49615, 49616, 49617, 49618,
+                                   49652, 49653, 49654, 49655, 49656, 49657),
+  "Inguinal Hernia Repair"     = c(49505, 49507, 49520, 49521, 49525, 49550,
+                                   49553, 49650, 49651),
+  "Hiatal/PEH Repair"          = c(43280, 43281, 43282),
+  "Enterostomy Closure"        = c(44620, 44625, 44626, 44227),
+  "Small Bowel Resection"      = c(44120, 44121, 44125, 44130, 44202),
+  "Esophagectomy"              = c(43107, 43108, 43112, 43113, 43116, 43117,
+                                   43118, 43121, 43122, 43123, 43124, 43287,
+                                   43288, 43289),
+  "Transplant/Donor"           = c(50360, 50365, 50370, 47135, 47136, 47140,
+                                   48160, 48550, 48554, 48556, 50300, 50320,
+                                   50323, 50325, 50327, 50328, 50329, 50340,
+                                   50543, 50544, 50545, 50547, 50225)
+)
+
+# Build reverse lookup: CPT -> category
+.cpt_to_category <- local({
+  lut <- new.env(hash = TRUE, parent = emptyenv())
+  for (cat in names(PROCEDURE_CPT_MAP)) {
+    for (cpt in PROCEDURE_CPT_MAP[[cat]]) {
+      assign(as.character(cpt), cat, envir = lut)
+    }
+  }
+  lut
+})
+
+#' Classify a case into a procedure category
+#'
+#' NSQIP targeted module flags (colectomy, proctectomy) take precedence
+#' over CPT-based classification.
+#'
+#' @param cpt_code CPT code (numeric)
+#' @param colectomy_flag 1 if NSQIP colectomy module, 0 otherwise
+#' @param proctectomy_flag 1 if NSQIP proctectomy module, 0 otherwise
+#' @return Character: procedure category name
+classify_procedure <- function(cpt_code, colectomy_flag = 0, proctectomy_flag = 0) {
+  if (!is.na(colectomy_flag) && colectomy_flag == 1) return("Colectomy")
+  if (!is.na(proctectomy_flag) && proctectomy_flag == 1) return("Proctectomy")
+  cpt_str <- as.character(as.integer(cpt_code))
+  cat <- tryCatch(get(cpt_str, envir = .cpt_to_category), error = function(e) NULL)
+  if (!is.null(cat)) cat else "Other"
+}
+
+#' Classify all cases in a data frame
+#' @param data Case data with cpt_code, colectomy_flag, proctectomy_flag columns
+#' @return Data with procedure_category column added
+assign_procedure_categories <- function(data) {
+  data |>
+    mutate(procedure_category = mapply(
+      classify_procedure, cpt_code, colectomy_flag, proctectomy_flag
+    ))
+}
+
+
+#' Build procedure mix profile table for a specialty/division
+#'
+#' @param data Processed case data (with procedure_category column)
+#' @param spec Specialty name
+#' @param div Optional division name
+#' @return A tibble with one row per procedure category, or NULL
+build_procedure_mix <- function(data, spec, div = NULL) {
+  
+  df <- data |> filter(specialty == spec)
+  if (!is.null(div) && nchar(div) > 0) {
+    df <- df |> filter(division == div)
+  }
+  if (nrow(df) == 0) return(NULL)
+  
+  n_total <- nrow(df)
+  
+  # Any-complication indicator (excluding morbidity composite)
+  comp_cols <- c("mortality", "cardiac", "pneumonia", "unplanned_intubation",
+                 "vent48", "vte", "renal_failure", "uti", "ssi", "sepsis",
+                 "cdiff", "unplanned_reop", "unplanned_readmit")
+  df$any_complication <- as.integer(rowSums(df[, comp_cols], na.rm = TRUE) > 0)
+  
+  proc_summary <- df |>
+    group_by(procedure_category) |>
+    summarise(
+      n          = n(),
+      pct_total  = round(n() / n_total * 100, 1),
+      n_comp     = sum(any_complication, na.rm = TRUE),
+      comp_rate  = round(sum(any_complication, na.rm = TRUE) / n() * 100, 1),
+      median_los = round(median(los, na.rm = TRUE), 0),
+      .groups    = "drop"
+    ) |>
+    arrange(desc(n))
+  
+  proc_summary |>
+    transmute(
+      Procedure   = procedure_category,
+      N           = n,
+      `% Total`   = pct_total,
+      `w/ Comp`   = n_comp,
+      `Comp %`    = comp_rate,
+      `Med LOS`   = median_los
+    )
+}
+
+
+#' Build division-level complication rates by targeted procedure category
+#'
+#' For each targeted procedure type the division performs, computes the
+#' division's own observed complication rates. Designed to sit alongside
+#' the site-level targeted SAR benchmarks for comparison.
+#'
+#' @param data Processed case data (with procedure_category column)
+#' @param spec Specialty name
+#' @param div Optional division name
+#' @param targeted_data Parsed targeted SAR (to know which complications to show)
+#' @return A named list of tibbles (one per procedure), or NULL
+build_division_procedure_rates <- function(data, spec, div = NULL, targeted_data = NULL) {
+  
+  if (is.null(targeted_data)) return(NULL)
+  
+  df <- data |> filter(specialty == spec)
+  if (!is.null(div) && nchar(div) > 0) {
+    df <- df |> filter(division == div)
+  }
+  if (nrow(df) == 0) return(NULL)
+  
+  # Only targeted procedures relevant to this specialty
+  td <- targeted_data |> filter(specialty == spec)
+  if (nrow(td) == 0) return(NULL)
+  
+  # Map from targeted complication names to our column names
+  comp_col_map <- c(
+    "Mortality"              = "mortality",
+    "Morbidity"              = "morbidity",
+    "Cardiac"                = "cardiac",
+    "Pneumonia"              = "pneumonia",
+    "Unplanned Intubation"   = "unplanned_intubation",
+    "Ventilator > 48 Hours"  = "vent48",
+    "VTE"                    = "vte",
+    "Renal Failure"          = "renal_failure",
+    "UTI"                    = "uti",
+    "SSI"                    = "ssi",
+    "Sepsis"                 = "sepsis",
+    "C.diff Colitis"         = "cdiff",
+    "Unplanned Reoperation"  = "unplanned_reop",
+    "Unplanned Readmission"  = "unplanned_readmit",
+    "Anastomotic Leak"       = "anastomotic_leak",
+    "Prolonged NPO/NGT Use"  = "prolonged_npo"
+  )
+  
+  results <- list()
+  
+  for (proc_name in unique(td$targeted_procedure)) {
+    proc_cat <- unique(td$procedure_category[td$targeted_procedure == proc_name])
+    if (length(proc_cat) == 0) next
+    
+    proc_cases <- df |> filter(procedure_category %in% proc_cat)
+    n <- nrow(proc_cases)
+    if (n == 0) next
+    
+    # Get the complications tracked for this targeted procedure
+    proc_comps <- td |>
+      filter(targeted_procedure == proc_name) |>
+      pull(complication) |>
+      unique()
+    # Drop Length of Stay (not a binary complication)
+    proc_comps <- proc_comps[proc_comps != "Length of Stay"]
+    
+    rows <- list()
+    for (comp in proc_comps) {
+      col <- comp_col_map[comp]
+      if (is.na(col) || !(col %in% names(proc_cases))) next
+      
+      n_events <- sum(proc_cases[[col]], na.rm = TRUE)
+      obs_pct <- round(n_events / n * 100, 2)
+      
+      rows[[length(rows) + 1]] <- tibble(
+        Complication = comp,
+        N            = n,
+        Events       = n_events,
+        `Obs %`      = obs_pct
+      )
+    }
+    
+    if (length(rows) > 0) {
+      results[[proc_name]] <- bind_rows(rows)
+    }
+  }
+  
+  if (length(results) == 0) return(NULL)
+  results
 }
