@@ -18,6 +18,7 @@ format:
       - \fancyhead[R]{\nouppercase{\leftmark}}
       - \fancyfoot[C]{\thepage}
       - \usepackage{float}
+      - \usepackage{longtable}
       - \floatplacement{figure}{H}
       - \usepackage{colortbl}
       - \definecolor{sigred}{HTML}{CB181D}
@@ -379,6 +380,48 @@ ggplot(monthly, aes(x = month, y = cases)) +
 
 ---
 
-*Report generated `r format(Sys.time(), "%Y-%m-%d %H:%M")` | NSQIP CUSUM Monitoring System v1.2*
+\newpage
+
+# Appendix: Recent Cases with Complications
+
+```{r complication-caselist}
+#| results: asis
+
+comp_caselist <- build_complication_caselist(case_data, spec, div, months = 3)
+
+if (!is.null(comp_caselist) && nrow(comp_caselist) > 0) {
+  
+  # Date range for the case list
+  cutoff <- max(spec_data$op_date, na.rm = TRUE) %m-% months(3)
+  n_period_cases <- sum(spec_data$op_date > cutoff)
+  
+  cat(paste0(
+    "Cases with at least one complication in the most recent 3 months ",
+    "(operations after ", format(cutoff, "%B %d, %Y"), "). ",
+    "**", nrow(comp_caselist), "** of **", n_period_cases,
+    "** cases (", round(nrow(comp_caselist) / n_period_cases * 100, 1),
+    "%) had one or more occurrences. ",
+    "PATOS (present at time of surgery) events are excluded.\n\n"
+  ))
+  
+  kable(comp_caselist, format = "latex", booktabs = TRUE,
+        align = c("l","l","l","l","c","c","l"),
+        caption = paste0("Cases with Complications — ", report_name,
+                         " (Last 3 Months)"),
+        longtable = TRUE) |>
+    kable_styling(
+      latex_options = c("hold_position", "repeat_header"),
+      font_size = 7
+    ) |>
+    print()
+  
+} else {
+  cat("No complications recorded in the most recent 3 months.\n\n")
+}
+```
+
+---
+
+*Report generated `r format(Sys.time(), "%Y-%m-%d %H:%M")` | NSQIP CUSUM Monitoring System v1.3*
 \
 *Benchmark: `r bench_desc``r if (!is.null(div)) paste0(" | Division: ", div)`*

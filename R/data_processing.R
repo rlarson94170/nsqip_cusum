@@ -50,6 +50,7 @@ process_case_details <- function(
     transmute(
       # Identifiers
       case_id    = `Case Number`,
+      lmrn       = as.character(as.integer(`LMRN`)),
       op_date    = op_date,
       specialty  = `Surgical Specialty`,
       surgeon    = `Attending/Staff Surgeon`,
@@ -57,6 +58,9 @@ process_case_details <- function(
       cpt_desc   = `CPT Description`,
       age        = `Age at Time of Surgery`,
       asa_class  = `ASA Classification`,
+      los        = as.numeric(`Hospital Length of Stay`),
+      readmit_related   = as.integer(as.numeric(`# of Readmissions likely related to Primary Procedure`) > 0),
+      readmit_unrelated = as.integer(as.numeric(`# of Readmissions likely unrelated to Primary Procedure`) > 0),
       
       # ---- Individual complication indicators ----
       
@@ -156,7 +160,8 @@ process_case_details <- function(
     ) |>
     # Drop intermediate working columns
     select(
-      case_id, op_date, specialty, surgeon, cpt_code, cpt_desc, age, asa_class,
+      case_id, lmrn, op_date, specialty, surgeon, cpt_code, cpt_desc,
+      age, asa_class, los, readmit_related, readmit_unrelated,
       mortality, morbidity, cardiac, pneumonia, unplanned_intubation,
       vent48, vte, renal_failure, uti, ssi, sepsis, cdiff,
       unplanned_reop, unplanned_readmit
@@ -166,7 +171,8 @@ process_case_details <- function(
   complication_cols <- c(
     "mortality", "morbidity", "cardiac", "pneumonia", "unplanned_intubation",
     "vent48", "vte", "renal_failure", "uti", "ssi", "sepsis", "cdiff",
-    "unplanned_reop", "unplanned_readmit"
+    "unplanned_reop", "unplanned_readmit",
+    "readmit_related", "readmit_unrelated"
   )
   processed <- processed |>
     mutate(across(all_of(complication_cols), ~replace_na(., 0L)))
@@ -319,4 +325,121 @@ observed_rates_summary <- function(data, spec, div = NULL) {
     n_events  = sapply(comps, function(c) sum(spec_data[[c]], na.rm = TRUE)),
     observed_rate_pct = round(n_events / n_cases * 100, 2)
   )
+}
+
+
+#' Build a case-level complication list for the appendix
+#'
+#' Returns one row per case that had at least one complication (excluding
+#' morbidity composite), with a human-readable occurrence string.
+#' Only includes cases from the most recent `months` of data.
+#'
+#' @param data Processed case data
+#' @param spec Specialty name
+#' @param div Optional division name
+#' @param months Number of trailing months to include (default 3)
+#' @return A tibble ready for table display, or NULL if no cases
+build_complication_caselist <- function(data, spec, div = NULL, months = 3) {
+  
+  df <- data |> filter(specialty == spec)
+  if (!is.null(div) && nchar(div) > 0) {
+    df <- df |> filter(division == div)
+  }
+  
+  # Filter to trailing N months
+  cutoff <- max(df$op_date, na.rm = TRUE) %m-% months(months)
+  df <- df |> filter(op_date > cutoff)
+  
+  if (nrow(df) == 0) return(NULL)
+  
+  # Individual complications to check (exclude morbidity composite)
+  comp_vars <- c(
+    "mortality"            = "Death",
+    "cardiac"              = "Cardiac",
+    "pneumonia"            = "Pneumonia",
+    "unplanned_intubation" = "Unplanned Intubation",
+    "vent48"               = "Vent > 48h",
+    "vte"                  = "VTE",
+    "renal_failure"        = "Renal Failure",
+    "uti"                  = "UTI",
+    "ssi"                  = "SSI",
+    "sepsis"               = "Sepsis",
+    "cdiff"                = "C.diff",
+    "unplanned_reop"       = "Return to OR"
+  )
+  
+  # Build occurrence string for each case using apply
+  occ_strings <- apply(df, 1, function(row) {
+    hits <- character()
+    for (vname in names(comp_vars)) {
+      val <- suppressWarnings(as.integer(row[[vname]]))
+      if (!is.na(val) && val == 1L) {
+        hits <- c(hits, comp_vars[vname])
+      }
+    }
+    # Handle readmission with relatedness
+    ra <- suppressWarnings(as.integer(row[["unplanned_readmit"]]))
+    if (!is.na(ra) && ra == 1L) {
+      rel   <- suppressWarnings(as.integer(row[["readmit_related"]]))
+      unrel <- suppressWarnings(as.integer(row[["readmit_unrelated"]]))
+      rel   <- ifelse(is.na(rel), 0L, rel)
+      unrel <- ifelse(is.na(unrel), 0L, unrel)
+      if (rel == 1L && unrel == 1L) {
+        hits <- c(hits, "Readmission (related + unrelated)")
+      } else if (rel == 1L) {
+        hits <- c(hits, "Readmission (related)")
+      } else if (unrel == 1L) {
+        hits <- c(hits, "Readmission (unrelated)")
+      } else {
+        hits <- c(hits, "Readmission")
+      }
+    }
+    paste(hits, collapse = ", ")
+  })
+  
+  df$.comp_list <- occ_strings
+  df <- df |> filter(nchar(.comp_list) > 0)
+  
+  if (nrow(df) == 0) return(NULL)
+  
+  # Format surgeon name: "LAST, First" without ID number
+  format_surgeon <- function(s) {
+    # Remove parenthetical ID: "LASTNAME,FIRST (12345)" -> "LASTNAME,FIRST"
+    s <- gsub("\\s*\\(\\d+\\)$", "", s)
+    # Title case: "LASTNAME,FIRST" -> "Lastname, First"
+    parts <- strsplit(s, ",")[[1]]
+    if (length(parts) == 2) {
+      last  <- paste0(toupper(substr(trimws(parts[1]), 1, 1)),
+                      tolower(substr(trimws(parts[1]), 2, nchar(trimws(parts[1])))))
+      first <- paste0(toupper(substr(trimws(parts[2]), 1, 1)),
+                      tolower(substr(trimws(parts[2]), 2, nchar(trimws(parts[2])))))
+      paste0(last, ", ", first)
+    } else {
+      s
+    }
+  }
+  
+  # Format ASA: extract just the class number
+  format_asa <- function(a) {
+    m <- regmatches(a, regexpr("[IV]+", a))
+    if (length(m) > 0) m else a
+  }
+  
+  result <- df |>
+    mutate(
+      surgeon_short = sapply(surgeon, format_surgeon),
+      asa_short     = sapply(asa_class, format_asa)
+    ) |>
+    arrange(op_date) |>
+    transmute(
+      MRN         = lmrn,
+      `Op Date`   = format(op_date, "%m/%d/%y"),
+      Surgeon     = surgeon_short,
+      CPT         = cpt_code,
+      ASA         = asa_short,
+      LOS         = as.integer(los),
+      Occurrences = .comp_list
+    )
+  
+  result
 }
