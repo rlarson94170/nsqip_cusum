@@ -258,6 +258,70 @@ kable(summary_tbl, format = "latex", booktabs = TRUE, align = "lrrcccl",
 
 \newpage
 
+# Monthly Complication Dashboard
+
+```{r dashboard}
+#| results: asis
+
+dashboard <- build_dashboard(case_data, spec, div, benchmark_rates)
+
+if (!is.null(dashboard)) {
+  
+  dtbl <- dashboard$table
+  
+  cat(paste0(
+    "Monthly event counts for ", report_name, " (",
+    dashboard$months[1], "–", dashboard$months[length(dashboard$months)],
+    " ", format(date_min, "%Y"),
+    "). PATOS events excluded. SAR \\% shows site-level risk-adjusted ",
+    "expected rates where available.\n\n"
+  ))
+  
+  # Format display table
+  dtbl_display <- dtbl
+  month_cols <- dashboard$months
+  
+  # Convert month/total columns to character so we control display
+  for (mc in c(month_cols, "Total")) {
+    dtbl_display[[mc]] <- as.character(dtbl_display[[mc]])
+  }
+  
+  # Format Rate % and SAR %: blank if NA, otherwise one decimal
+  dtbl_display$`Rate %` <- ifelse(
+    is.na(dtbl$`Rate %`), "",
+    format(dtbl$`Rate %`, nsmall = 1)
+  )
+  dtbl_display$`SAR %` <- ifelse(
+    is.na(dtbl$`SAR %`), "",
+    format(dtbl$`SAR %`, nsmall = 1)
+  )
+  
+  k <- kable(dtbl_display, format = "latex", booktabs = TRUE,
+        align = c("l", rep("c", length(month_cols)), "r", "r", "r"),
+        caption = paste0("Monthly Complication Dashboard — ", report_name),
+        linesep = "") |>
+    kable_styling(latex_options = c("hold_position", "scale_down"),
+                  font_size = 7) |>
+    row_spec(1, bold = TRUE, background = "#E8E8E8") |>
+    row_spec(2, bold = TRUE)
+  
+  # Add group row packing
+  for (g in names(dashboard$pack_rows)) {
+    start_row <- dashboard$pack_rows[[g]][1]
+    end_row   <- dashboard$pack_rows[[g]][2]
+    n_rows    <- end_row - start_row + 1
+    k <- k |> pack_rows(g, start_row, end_row,
+                         bold = TRUE, italic = FALSE,
+                         hline_before = TRUE, hline_after = FALSE)
+  }
+  
+  print(k)
+  
+}
+```
+
+\newpage
+
 # CUSUM Charts
 
 ```{r generate-charts}
@@ -538,6 +602,6 @@ if (!is.null(comp_caselist) && nrow(comp_caselist) > 0) {
 
 ---
 
-*Report generated `r format(Sys.time(), "%Y-%m-%d %H:%M")` | NSQIP CUSUM Monitoring System v1.3*
+*Report generated `r format(Sys.time(), "%Y-%m-%d %H:%M")` | NSQIP CUSUM Monitoring System v1.4*
 \
 *Benchmark: `r bench_desc``r if (!is.null(div)) paste0(" | Division: ", div)`*

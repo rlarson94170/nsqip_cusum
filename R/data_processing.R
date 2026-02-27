@@ -76,6 +76,31 @@ process_case_details <- function(
         `Proctectomy Prolonged Postoperative NPO or NGT Use` == "Yes"
       ),
       
+      # Granular sub-complication indicators for dashboard
+      # (these are pre-PATOS; PATOS adjustment applied below)
+      ssi_superficial_raw = safe_binary(`# of Postop Superficial Incisional SSI`),
+      ssi_superficial_pat = safe_binary(`# of Postop Superficial Incisional SSI PATOS`),
+      ssi_deep_raw        = safe_binary(`# of Postop Deep Incisional SSI`),
+      ssi_deep_pat        = safe_binary(`# of Postop Deep Incisional SSI PATOS`),
+      ssi_organ_raw       = safe_binary(`# of Postop Organ/Space SSI`),
+      ssi_organ_pat       = safe_binary(`# of Postop Organ/Space SSI PATOS`),
+      septic_shock_raw    = safe_binary(`# of Postop Septic Shock`),
+      septic_shock_pat    = safe_binary(`# of Postop Septic Shock PATOS`),
+      renal_insuff        = safe_binary(`# of Postop Renal Insufficiency`),
+      postop_dialysis_ind = safe_binary(`# of Postop Dialysis`),
+      cardiac_arrest      = safe_binary(`# of Cardiac Arrest Requiring CPR`),
+      mi                  = safe_binary(`# of Myocardial Infarction`),
+      dvt                 = safe_binary(`# of Postop Venous Thrombosis Requiring Therapy`),
+      pe                  = safe_binary(`# of Postop Pulmonary Embolism`),
+      wound_disruption    = safe_binary(`# of Postop Wound Disruption`),
+      stroke_cva_ind      = safe_binary(`# of Stroke/Cerebral Vascular Accident (CVA)`),
+      
+      # PATOS-adjusted dashboard sub-indicators
+      d_ssi_superficial = as.integer(ssi_superficial_raw == 1 & ssi_superficial_pat == 0),
+      d_ssi_deep        = as.integer(ssi_deep_raw == 1 & ssi_deep_pat == 0),
+      d_ssi_organ       = as.integer(ssi_organ_raw == 1 & ssi_organ_pat == 0),
+      d_septic_shock    = as.integer(septic_shock_raw == 1 & septic_shock_pat == 0),
+      
       # ---- Individual complication indicators ----
       
       # 1. Mortality: 30-day death
@@ -177,6 +202,11 @@ process_case_details <- function(
       case_id, lmrn, op_date, specialty, surgeon, cpt_code, cpt_desc,
       age, asa_class, los, readmit_related, readmit_unrelated,
       colectomy_flag, proctectomy_flag, anastomotic_leak, prolonged_npo,
+      # Dashboard sub-indicators (PATOS-adjusted)
+      d_ssi_superficial, d_ssi_deep, d_ssi_organ,
+      d_septic_shock, renal_insuff, postop_dialysis_ind,
+      cardiac_arrest, mi, dvt, pe, wound_disruption, stroke_cva_ind,
+      # Standard CUSUM indicators
       mortality, morbidity, cardiac, pneumonia, unplanned_intubation,
       vent48, vte, renal_failure, uti, ssi, sepsis, cdiff,
       unplanned_reop, unplanned_readmit
@@ -188,7 +218,10 @@ process_case_details <- function(
     "vent48", "vte", "renal_failure", "uti", "ssi", "sepsis", "cdiff",
     "unplanned_reop", "unplanned_readmit",
     "readmit_related", "readmit_unrelated",
-    "anastomotic_leak", "prolonged_npo"
+    "anastomotic_leak", "prolonged_npo",
+    "d_ssi_superficial", "d_ssi_deep", "d_ssi_organ",
+    "d_septic_shock", "renal_insuff", "postop_dialysis_ind",
+    "cardiac_arrest", "mi", "dvt", "pe", "wound_disruption", "stroke_cva_ind"
   )
   processed <- processed |>
     mutate(across(all_of(complication_cols), ~replace_na(., 0L)))
@@ -668,4 +701,164 @@ build_division_procedure_rates <- function(data, spec, div = NULL, targeted_data
   
   if (length(results) == 0) return(NULL)
   results
+}
+
+
+# =============================================================================
+# Monthly Complication Dashboard
+# =============================================================================
+
+#' Dashboard complication row definitions
+#'
+#' Each entry: display_name, data_column, group, sar_complication (for rate lookup)
+#' sar_complication is the matching SAR complication name, or NA if no direct match
+DASHBOARD_ROWS <- list(
+  # Group: top-level
+  list("Cases Reviewed",           NA,                    "Volume",            NA),
+  list("Mortality",                "mortality",           "Volume",            "Mortality"),
+  # Group: Infection Related
+  list("Superficial SSI",          "d_ssi_superficial",   "Infection Related", NA),
+  list("Deep SSI",                 "d_ssi_deep",          "Infection Related", NA),
+  list("Organ/Space SSI",          "d_ssi_organ",         "Infection Related", NA),
+  list("UTI",                      "uti",                 "Infection Related", "UTI"),
+  list("Sepsis",                   "sepsis",              "Infection Related", "Sepsis"),
+  list("Septic Shock",             "d_septic_shock",      "Infection Related", NA),
+  list("C.diff Colitis",           "cdiff",               "Infection Related", "C.diff Colitis"),
+  list("Wound Disruption",         "wound_disruption",    "Infection Related", NA),
+  # Group: Respiratory
+  list("Pneumonia",                "pneumonia",           "Respiratory",       "Pneumonia"),
+  list("Unplanned Intubation",     "unplanned_intubation","Respiratory",       "Unplanned Intubation"),
+  list("Prolonged Vent (>48h)",    "vent48",              "Respiratory",       "Ventilator > 48h"),
+  # Group: Renal
+  list("Renal Insufficiency (AKI)","renal_insuff",        "Renal",             NA),
+  list("Renal Failure (Dialysis)", "postop_dialysis_ind", "Renal",             NA),
+  # Group: Cardiac
+  list("Cardiac Arrest",           "cardiac_arrest",      "Cardiac",           NA),
+  list("Myocardial Infarction",    "mi",                  "Cardiac",           NA),
+  # Group: VTE/PE
+  list("Venous Thromboembolism",   "dvt",                 "VTE/PE",            NA),
+  list("Pulmonary Embolism",       "pe",                  "VTE/PE",            NA),
+  # Group: Readm/ROR
+  list("Unplanned Readmission",    "unplanned_readmit",   "Readm/ROR",        "Unplanned Readmission"),
+  list("Return to OR",             "unplanned_reop",      "Readm/ROR",        "Unplanned Reoperation")
+)
+
+# SAR complication names that map to dashboard groups (for group-level rates)
+DASHBOARD_GROUP_SAR <- list(
+  "Infection Related" = "SSI",
+  "Respiratory"       = NA,
+  "Renal"             = "Renal Failure",
+  "Cardiac"           = "Cardiac",
+  "VTE/PE"            = "VTE"
+)
+
+
+#' Build monthly complication dashboard table
+#'
+#' @param data Processed case data
+#' @param spec Specialty name
+#' @param div Optional division name
+#' @param benchmark_rates Benchmark rates tibble (for SAR rate column)
+#' @return A list with: table (tibble), groups (for kableExtra pack_rows),
+#'         months (character vector of month labels)
+build_dashboard <- function(data, spec, div = NULL, benchmark_rates = NULL) {
+  
+  df <- data |> filter(specialty == spec)
+  if (!is.null(div) && nchar(div) > 0) {
+    df <- df |> filter(division == div)
+  }
+  if (nrow(df) == 0) return(NULL)
+  
+  n_total <- nrow(df)
+  
+  # Create month labels from the data range
+  df <- df |> mutate(month_label = format(op_date, "%b"))
+  month_order <- df |>
+    mutate(month_start = floor_date(op_date, "month")) |>
+    distinct(month_start) |>
+    arrange(month_start) |>
+    mutate(label = format(month_start, "%b")) |>
+    pull(label)
+  
+  # Monthly case counts
+  monthly_n <- df |>
+    mutate(month_label = factor(month_label, levels = month_order)) |>
+    count(month_label, .drop = FALSE) |>
+    pull(n, name = month_label)
+  
+  # Build each row
+  rows <- list()
+  group_info <- list()  # track group -> row indices for pack_rows
+  current_group <- ""
+  row_idx <- 0
+  
+  for (entry in DASHBOARD_ROWS) {
+    display_name <- entry[[1]]
+    col_name     <- entry[[2]]
+    group        <- entry[[3]]
+    sar_comp     <- entry[[4]]
+    
+    row_idx <- row_idx + 1
+    
+    # Track groups
+    if (group != current_group) {
+      current_group <- group
+      if (!(group %in% names(group_info))) {
+        group_info[[group]] <- c(start = row_idx, end = row_idx)
+      }
+    }
+    group_info[[group]]["end"] <- row_idx
+    
+    if (is.na(col_name)) {
+      # Cases Reviewed row
+      monthly_vals <- as.integer(monthly_n[month_order])
+      total_val <- n_total
+      rate_val <- NA_real_
+    } else {
+      # Complication row: count events per month
+      monthly_vals <- sapply(month_order, function(m) {
+        month_df <- df |> filter(month_label == m)
+        sum(month_df[[col_name]], na.rm = TRUE)
+      })
+      total_val <- sum(df[[col_name]], na.rm = TRUE)
+      rate_val <- round(total_val / n_total * 100, 1)
+    }
+    
+    # SAR rate lookup
+    sar_rate <- NA_real_
+    if (!is.null(benchmark_rates) && !is.na(sar_comp)) {
+      match <- benchmark_rates |>
+        filter(specialty == spec, complication == sar_comp)
+      if (nrow(match) > 0) {
+        sar_rate <- round(match$p0_pct[1], 1)
+      }
+    }
+    
+    row_data <- c(
+      list(Complication = display_name),
+      as.list(setNames(as.integer(monthly_vals), month_order)),
+      list(Total = as.integer(total_val),
+           `Rate %` = rate_val,
+           `SAR %` = sar_rate)
+    )
+    
+    rows[[row_idx]] <- as_tibble(row_data)
+  }
+  
+  result_table <- bind_rows(rows)
+  
+  # Clean up group_info: remove "Volume" since Mortality isn't really a group header
+  # Instead, make Cases/Mortality standalone, and group the rest
+  pack_info <- list()
+  for (g in names(group_info)) {
+    if (g == "Volume") next
+    pack_info[[g]] <- c(group_info[[g]]["start"], group_info[[g]]["end"])
+  }
+  
+  list(
+    table      = result_table,
+    pack_rows  = pack_info,
+    months     = month_order,
+    n_total    = n_total
+  )
 }
