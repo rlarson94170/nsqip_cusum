@@ -16,6 +16,9 @@
 library(quarto)
 library(tinytex)
 
+# Load the direct beamer slide renderer (bypasses Quarto/pandoc)
+source("R/render_beamer_slides.R")
+
 # ---- CONFIGURATION ----------------------------------------------------------
 
 # Path to the latest Case Details Report download
@@ -46,6 +49,9 @@ min_division_cases <- 10
 # CUSUM parameters
 odds_ratio <- 2.0     # p1 = OR of 2x relative to p0
 target_arl <- 500     # Average run length before false alarm
+
+# Output formats: set render_slides = TRUE to also produce beamer slide decks
+render_slides <- TRUE
 
 # Output directory
 output_dir <- "output"
@@ -83,12 +89,13 @@ message("Benchmark type: ", benchmark_type)
 message("Specialties:    ", paste(specialties, collapse = ", "))
 message("Divisions for:  ", ifelse(has_mapping, paste(division_specialties, collapse = ", "), "(none)"))
 message("Parameters:     OR = ", odds_ratio, ", Target ARL = ", target_arl)
+message("Slide decks:    ", ifelse(render_slides, "Yes", "No"))
 message("Output:         ", output_dir, "/")
 message(strrep("=", 65), "\n")
 
 # ---- Build list of reports to render ----------------------------------------
 
-# Helper to render a single report
+# Helper to render a single PDF report via Quarto
 render_one <- function(spec, div = "", label = NULL) {
   if (is.null(label)) {
     label <- if (nchar(div) > 0) paste0(spec, " — ", div) else spec
@@ -97,11 +104,13 @@ render_one <- function(spec, div = "", label = NULL) {
   spec_clean <- gsub("[/ ]", "_", tolower(spec))
   div_clean  <- gsub("[/ ]", "_", tolower(div))
   
-  filename <- if (nchar(div) > 0) {
-    paste0("NSQIP_CUSUM_", spec_clean, "_", div_clean, "_", format(Sys.Date(), "%Y%m%d"), ".pdf")
+  base_name <- if (nchar(div) > 0) {
+    paste0("NSQIP_CUSUM_", spec_clean, "_", div_clean, "_", format(Sys.Date(), "%Y%m%d"))
   } else {
-    paste0("NSQIP_CUSUM_", spec_clean, "_", format(Sys.Date(), "%Y%m%d"), ".pdf")
+    paste0("NSQIP_CUSUM_", spec_clean, "_", format(Sys.Date(), "%Y%m%d"))
   }
+  
+  filename <- paste0(base_name, ".pdf")
   output_file <- file.path(output_dir, filename)
   
   message("\n--- Rendering: ", label, " ---")
@@ -109,7 +118,6 @@ render_one <- function(spec, div = "", label = NULL) {
   tryCatch({
     quarto_render(
       input = "nsqip_cusum_report.qmd",
-      output_format = "pdf",
       execute_params = list(
         specialty            = spec,
         division             = div,
@@ -134,10 +142,49 @@ render_one <- function(spec, div = "", label = NULL) {
   })
 }
 
+# Helper to render a slide deck (direct R → LaTeX → PDF, no Quarto)
+render_slides_one <- function(spec, div = "") {
+  label <- if (nchar(div) > 0) paste0(spec, " \u2014 ", div) else spec
+  
+  spec_clean <- gsub("[/ ]", "_", tolower(spec))
+  div_clean  <- gsub("[/ ]", "_", tolower(div))
+  
+  base_name <- if (nchar(div) > 0) {
+    paste0("NSQIP_CUSUM_", spec_clean, "_", div_clean, "_", format(Sys.Date(), "%Y%m%d"))
+  } else {
+    paste0("NSQIP_CUSUM_", spec_clean, "_", format(Sys.Date(), "%Y%m%d"))
+  }
+  
+  filename <- paste0(base_name, "_slides.pdf")
+  out_file <- file.path(output_dir, filename)
+  
+  message("\n--- Rendering: ", label, " [slides] ---")
+  
+  tryCatch({
+    render_beamer_slides(
+      spec               = spec,
+      div                = div,
+      data_file          = data_file,
+      site_sar_file      = ifelse(is.null(site_sar_file), "", site_sar_file),
+      surgeon_mapping_file = ifelse(has_mapping, surgeon_mapping_file, ""),
+      benchmark_type     = benchmark_type,
+      odds_ratio         = odds_ratio,
+      target_arl         = target_arl,
+      output_file        = out_file
+    )
+    message("  \u2713 Success: ", out_file)
+  }, error = function(e) {
+    message("  \u2717 ERROR: ", e$message)
+  })
+}
+
 # ---- Render specialty-level reports -----------------------------------------
 
 for (spec in specialties) {
   render_one(spec)
+  if (render_slides) {
+    render_slides_one(spec)
+  }
 }
 
 # ---- Render division-level reports ------------------------------------------
@@ -170,6 +217,9 @@ if (has_mapping) {
                na.rm = TRUE)
       message("  (", div, ": ", n, " cases)")
       render_one(spec, div)
+      if (render_slides) {
+        render_slides_one(spec, div)
+      }
     }
   }
 }
