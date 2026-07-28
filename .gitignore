@@ -3,22 +3,21 @@
 .Rhistory
 .RData
 .Ruserdata
-
 # Quarto rendering artifacts
 *_files/
 *_cache/
 .quarto/
-
 # Output (regenerated)
 output/*.pdf
-
 # Data files (contain PHI — do not commit)
 data/*.xlsx
 data/*.csv
-
 # OS files
 .DS_Store
 Thumbs.db
 .Rproj.user
 .httr-oauth
 .quarto
+.positai
+old_data/
+old_output/

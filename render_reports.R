@@ -19,6 +19,11 @@ library(tinytex)
 # Load the direct beamer slide renderer (bypasses Quarto/pandoc)
 source("R/render_beamer_slides.R")
 
+# Verify the LaTeX environment before doing any work. Set strict = FALSE
+# to downgrade missing packages from an error to a warning.
+source("R/preflight.R")
+preflight_latex(strict = TRUE)
+
 # ---- CONFIGURATION ----------------------------------------------------------
 
 # Path to the latest Case Details Report download
