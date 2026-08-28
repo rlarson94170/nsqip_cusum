@@ -15,6 +15,7 @@ render_beamer_slides <- function(
     site_sar_file  = "",
     surgeon_mapping_file = "",
     benchmark_type = "site_expected",
+    specialties    = c("General Surgery", "Vascular", "Thoracic", "Plastics"),
     odds_ratio     = 2.0,
     target_arl     = 500,
     output_file    = NULL
@@ -25,6 +26,8 @@ render_beamer_slides <- function(
   source("R/benchmarks.R",       local = FALSE)
   source("R/data_processing.R",  local = FALSE)
   source("R/cusum_functions.R",  local = FALSE)
+  source("R/triage.R",           local = FALSE)
+  source("R/load_report_data.R", local = FALSE)
 
   suppressPackageStartupMessages({
     library(knitr)
@@ -33,6 +36,13 @@ render_beamer_slides <- function(
     library(dplyr)
     library(lubridate)
   })
+
+  # ---- Chart device --------------------------------------------------------
+  # The base "pdf" device encodes in Latin-1 and silently mangles the UTF-8 in
+  # chart subtitles (p0/p1 subscripts, en-dashes in p0 ranges), emitting
+  # "conversion failure" warnings. cairo_pdf handles them; fall back only if
+  # this R was built without cairo.
+  chart_device <- if (isTRUE(capabilities("cairo"))) grDevices::cairo_pdf else "pdf"
 
   # ---- Helper: strip table float wrapper for beamer compatibility ----------
   kable_to_tex <- function(k) {
@@ -43,36 +53,23 @@ render_beamer_slides <- function(
   }
 
   # ---- Load & prepare data -------------------------------------------------
-  case_data <- process_case_details(
-    filepath    = data_file,
-    specialties = c("General Surgery", "Vascular", "Thoracic", "Plastics")
+  # Shared with the Quarto report; see R/load_report_data.R
+  bundle <- load_report_data(
+    data_file            = data_file,
+    site_sar_file        = site_sar_file,
+    surgeon_mapping_file = surgeon_mapping_file,
+    benchmark_type       = benchmark_type,
+    specialties          = specialties
   )
 
-  if (nchar(surgeon_mapping_file) > 0 && file.exists(surgeon_mapping_file)) {
-    surgeon_map <- load_surgeon_mapping(surgeon_mapping_file)
-    case_data <- assign_divisions(case_data, surgeon_map)
-  } else {
-    case_data$division <- NA_character_
-  }
+  case_data          <- bundle$case_data
+  benchmark_rates    <- bundle$benchmark_rates
+  targeted_data      <- bundle$targeted_data
+  ot_data            <- bundle$ot_data
+  site_sar_available <- bundle$site_sar_available
 
-  case_data <- assign_procedure_categories(case_data)
-
-  site_sar_available <- nchar(site_sar_file) > 0 && file.exists(site_sar_file)
-
-  benchmark_rates <- get_benchmark_rates(
-    site_sar_path  = if (site_sar_available) site_sar_file else NULL,
-    benchmark_type = benchmark_type
-  )
-
-  ot_data <- NULL
-  if (site_sar_available) {
-    ot_data <- tryCatch(parse_over_time(site_sar_file), error = function(e) NULL)
-  }
-
-  targeted_data <- NULL
-  if (site_sar_available) {
-    targeted_data <- tryCatch(parse_targeted_sar(site_sar_file), error = function(e) NULL)
-  }
+  # Risk-adjusted targeted rates belong only in site_expected mode
+  targeted_p0 <- targeted_for_mode(bundle, benchmark_type)
 
   div_val <- if (nchar(div) > 0) div else NULL
 
@@ -112,12 +109,14 @@ render_beamer_slides <- function(
     theme(panel.grid.minor = element_blank(),
           plot.title = element_text(size = 14, face = "bold"))
   vol_file <- file.path(plot_dir, "volume.pdf")
-  ggsave(vol_file, p_vol, width = 9.5, height = 3.5, device = "pdf")
+  ggsave(vol_file, p_vol, width = 9.5, height = 3.5, device = chart_device)
 
   # CUSUM charts
   charts <- generate_specialty_charts(
     data = case_data, spec = spec, rates = benchmark_rates,
-    odds_ratio = odds_ratio, div = div_val
+    odds_ratio = odds_ratio, div = div_val,
+    targeted_rates = targeted_p0,
+    target_arl = target_arl
   )
   chart_files <- character(length(charts))
   for (i in seq_along(charts)) {
@@ -127,7 +126,7 @@ render_beamer_slides <- function(
             axis.title = element_text(size = 10),
             axis.text = element_text(size = 9))
     f <- file.path(plot_dir, paste0("cusum_", i, ".pdf"))
-    ggsave(f, p, width = 9.5, height = 3.5, device = "pdf")
+    ggsave(f, p, width = 9.5, height = 3.5, device = chart_device)
     chart_files[i] <- f
   }
 
@@ -159,7 +158,7 @@ render_beamer_slides <- function(
       oe_files <- character(length(oe_plots))
       for (i in seq_along(oe_plots)) {
         f <- file.path(plot_dir, paste0("oe_", i, ".pdf"))
-        ggsave(f, oe_plots[[i]], width = 9.5, height = 3.0, device = "pdf")
+        ggsave(f, oe_plots[[i]], width = 9.5, height = 3.0, device = chart_device)
         oe_files[i] <- f
       }
     }
@@ -237,6 +236,48 @@ render_beamer_slides <- function(
   add("\\textbf{CUSUM OR:} & ", odds_ratio,
       "$\\times$ \\quad ARL$_0$ $\\approx$ ", target_arl, " \\\\")
   add("\\end{tabular}")
+  add("\\end{frame}")
+  add("")
+
+  # -- Chart review priorities --
+  triage <- tryCatch(
+    build_triage(
+      data = case_data, spec = spec, div = div_val,
+      benchmark_rates = benchmark_rates,
+      targeted_rates  = targeted_p0,
+      odds_ratio = odds_ratio, target_arl = target_arl
+    ),
+    error = function(e) { message("  Triage failed: ", conditionMessage(e)); NULL }
+  )
+  triage <- annotate_carryover(triage, spec, div_val)
+
+  add("\\begin{frame}{Chart Review Priorities}")
+  flagged <- if (!is.null(triage)) dplyr::filter(triage, tier > 0) else NULL
+  if (is.null(flagged) || nrow(flagged) == 0) {
+    add("\\vspace{0.5cm}")
+    add("\\textbf{\\large No complication met the review threshold ",
+        "this period.}")
+    add("")
+    add("\\vspace{0.4cm}")
+    add("{\\small A complication is listed when its cumulative rate is ",
+        "elevated ($\\geq$ ", TRIAGE_MIN_EVENTS, " events and one-sided ",
+        "$p < ", TRIAGE_ALPHA, "$) or the CUSUM shows recent clustering. ",
+        "A CUSUM signal alone, with observed at or below expected, is ",
+        "clustering rather than excess and is not listed.}")
+  } else {
+    add("\\centering")
+    add("\\begin{tabular}{llrrrrl}")
+    add("\\textbf{Priority} & \\textbf{Complication} & \\textbf{Obs} & ",
+        "\\textbf{Exp} & \\textbf{O/E} & \\textbf{p} & \\textbf{Status} \\\\")
+    add("\\hline")
+    for (i in seq_len(nrow(flagged))) {
+      r <- flagged[i, ]
+      add(tex_escape(r$tier_label), " & ", tex_escape(r$complication), " & ",
+          r$observed, " & ", r$expected, " & ", r$oe, " & ", r$p_value,
+          " & ", tex_escape(ifelse(is.na(r$status), "", r$status)), " \\\\")
+    }
+    add("\\end{tabular}")
+  }
   add("\\end{frame}")
   add("")
 

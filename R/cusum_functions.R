@@ -11,33 +11,54 @@ library(dplyr)
 
 #' Compute Bernoulli CUSUM for a binary outcome vector
 #'
+#' Supports a per-case p0 (risk-adjusted CUSUM, Steiner et al. 2000): when p0
+#' is a vector, each case is scored against its own expected rate, so a chart
+#' can mix procedure cohorts with different baseline risk.
+#'
 #' @param outcomes Integer vector of 0/1 outcomes in chronological order
-#' @param p0 Acceptable (expected) event rate (proportion, not %)
+#' @param p0 Acceptable (expected) event rate as a proportion. Either a single
+#'   value applied to every case, or a vector of length(outcomes) giving each
+#'   case its own expected rate.
 #' @param odds_ratio The odds ratio for p1 relative to p0 (default 2.0)
-#' @param h Decision boundary. If NULL, auto-calibrated.
+#' @param h Decision boundary. If NULL, calibrated by simulation.
 #' @param reset Logical: reset to 0 after crossing h?
-#' @return A tibble with columns: case_num, outcome, score, cusum, signal, h
-compute_cusum <- function(outcomes, p0, odds_ratio = 2.0, h = NULL, reset = TRUE) {
-  
+#' @param target_arl Target in-control ARL used when h is calibrated
+#' @return A tibble with columns: case_num, outcome, score, cusum, signal, h,
+#'   p0, p1. Attributes `arl0` and `events_to_signal` carry the achieved
+#'   in-control ARL and the minimum number of consecutive events that will
+#'   drive the statistic from 0 across h.
+compute_cusum <- function(outcomes, p0, odds_ratio = 2.0, h = NULL,
+                          reset = TRUE, target_arl = 500) {
+
   n <- length(outcomes)
-  
+  if (n == 0) stop("compute_cusum(): `outcomes` is empty.")
+
+  if (length(p0) == 1) p0 <- rep(p0, n)
+  if (length(p0) != n) {
+    stop("compute_cusum(): `p0` must be length 1 or length(outcomes) (",
+         n, "), got ", length(p0), ".")
+  }
+  if (anyNA(p0)) stop("compute_cusum(): `p0` contains NA.")
+  if (any(p0 <= 0 | p0 >= 1)) {
+    stop("compute_cusum(): `p0` must be strictly between 0 and 1.")
+  }
+
   or0 <- p0 / (1 - p0)
   or1 <- odds_ratio * or0
-  p1 <- or1 / (1 + or1)
-  
+  p1  <- or1 / (1 + or1)
+
   s_event   <- log((p1 * (1 - p0)) / (p0 * (1 - p1)))
   s_noevent <- log((1 - p1) / (1 - p0))
-  
+
   if (is.null(h)) {
-    h <- calibrate_h(p0, p1, target_arl = 500)
+    h <- calibrate_h(p0, odds_ratio = odds_ratio, target_arl = target_arl)
   }
-  
-  # Vectorize scores, then loop only for the cumulative max(0, ...) with reset
+
   scores <- ifelse(outcomes == 1, s_event, s_noevent)
-  
+
   cusum_vals <- numeric(n)
   signals    <- logical(n)
-  
+
   C_prev <- 0
   for (i in seq_len(n)) {
     C_prev <- max(0, C_prev + scores[i])
@@ -47,40 +68,163 @@ compute_cusum <- function(outcomes, p0, odds_ratio = 2.0, h = NULL, reset = TRUE
       if (reset) C_prev <- 0
     }
   }
-  
-  tibble(
-    case_num = 1:n, outcome = outcomes, score = scores,
+
+  out <- tibble(
+    case_num = seq_len(n), outcome = outcomes, score = scores,
     cusum = cusum_vals, signal = signals, h = h, p0 = p0, p1 = p1
   )
+
+  attr(out, "arl0")             <- attr(h, "arl0")
+  attr(out, "events_to_signal") <- ceiling(as.numeric(h) / mean(s_event))
+  out
 }
 
 
-#' Calibrate h for a target ARL₀ ≈ 500 with odds ratio = 2
+#' Calibrate the decision boundary h to a target in-control ARL
 #'
-#' Uses a pre-computed lookup table derived from Monte Carlo simulation
-#' (1000 runs × 3000 cases, cumsum/cummin vectorized method).
-#' This eliminates all simulation at runtime — h is returned instantly.
+#' Replaces the previous hard-coded lookup table, which was generated only for
+#' OR = 2 and was badly miscalibrated for p0 below 4.5%: it returned h = 4.5
+#' there, giving an in-control ARL of 4,000–29,000 rather than the documented
+#' 500. Because most monitored complications sit in that range (mortality,
+#' cardiac, VTE, pneumonia are all ~0.5–1.5%), those charts could not
+#' realistically signal.
 #'
-#' The table was generated for OR=2.0 and ARL₀≈500.
-#' For p₀ < 4.5%, h=4.5 is appropriate because at these low rates,
-#' individual events carry substantial weight in the log-likelihood.
+#' Method: simulate in-control case series by drawing expected rates i.i.d.
+#' from the empirical distribution of `p0` — i.e. future cases from the same
+#' case mix, not this exact past order — accumulate the CUSUM, and record the
+#' running maximum. Because the run length to a first signal is a monotone
+#' step function of h over a fixed set of paths, every candidate h is
+#' evaluated against the same simulated paths and the search is exact.
+#' Resetting after a signal does not affect the first crossing, so it is
+#' ignored here.
 #'
-#' @param p0 Acceptable rate (proportion)
-#' @param p1 Unacceptable rate (proportion, used only for validation)
-#' @param target_arl Target ARL (default 500; used only for documentation)
-#' @return Calibrated h value
-calibrate_h <- function(p0, p1, target_arl = 500) {
-  
-  # Lookup table: h as a function of p0, for OR=2, ARL₀≈500
-  # Generated via vectorized Monte Carlo (1000 sims × 3000 cases)
-  if      (p0 < 0.045) h <- 4.5
-  else if (p0 < 0.070) h <- 2.5
-  else if (p0 < 0.095) h <- 3.0
-  else if (p0 < 0.115) h <- 3.5
-  else if (p0 < 0.135) h <- 4.0
-  else                  h <- 4.5
-  
+#' A caution the caller should propagate: an ARL measured in *cases* is a weak
+#' guarantee for a rare complication. At p0 = 0.6%, ARL0 = 500 cases means
+#' signalling on roughly two events, because only three are expected in that
+#' span. Check `attr(h, "events_to_signal")` before treating a low-rate chart
+#' as a calibrated alarm rather than a description.
+#'
+#' @param p0 Expected rate(s) as proportions — scalar or per-case vector
+#' @param odds_ratio Odds ratio defining p1 (default 2.0)
+#' @param target_arl Target in-control ARL, in cases (default 500)
+#' @param n_sim Number of simulated series (default 400)
+#' @param seed RNG seed, so a given report is reproducible
+#' @return Calibrated h, with attributes `arl0`, `events_to_signal` and
+#'   `censored` (fraction of paths that never signalled)
+calibrate_h <- function(p0, odds_ratio = 2.0, target_arl = 500,
+                        n_sim = 400, seed = 20260101) {
+
+  p0 <- p0[!is.na(p0)]
+  if (length(p0) == 0) stop("calibrate_h(): no usable p0 values.")
+  if (any(p0 <= 0 | p0 >= 1)) {
+    stop("calibrate_h(): `p0` must be strictly between 0 and 1.")
+  }
+
+  key <- .h_cache_key(p0, odds_ratio, target_arl, n_sim)
+  cached <- .h_cache[[key]]
+  if (!is.null(cached)) return(cached)
+
+  or1 <- odds_ratio * (p0 / (1 - p0))
+  p1  <- or1 / (1 + or1)
+  s_event   <- log((p1 * (1 - p0)) / (p0 * (1 - p1)))
+  s_noevent <- log((1 - p1) / (1 - p0))
+
+  # Long enough that few in-control paths fail to signal by the target ARL
+  max_cases <- max(2000L, as.integer(20 * target_arl))
+
+  old_seed <- if (exists(".Random.seed", .GlobalEnv)) {
+    get(".Random.seed", .GlobalEnv)
+  } else NULL
+  set.seed(seed)
+  on.exit({
+    if (!is.null(old_seed)) assign(".Random.seed", old_seed, .GlobalEnv)
+  }, add = TRUE)
+
+  # For each path keep only the record levels of the running max and the case
+  # index at which each was reached — enough to read off the first crossing
+  # for any h, at a fraction of the memory of the full path.
+  rec_val <- vector("list", n_sim)
+  rec_idx <- vector("list", n_sim)
+
+  for (k in seq_len(n_sim)) {
+    j  <- sample.int(length(p0), max_cases, replace = TRUE)
+    ev <- stats::runif(max_cases) < p0[j]
+    x  <- ifelse(ev, s_event[j], s_noevent[j])
+
+    S <- cumsum(x)
+    C <- S - pmin(0, cummin(S))
+    M <- cummax(C)
+
+    up <- which(M > c(0, M[-max_cases]))
+    rec_val[[k]] <- M[up]
+    rec_idx[[k]] <- up
+  }
+
+  # Run length to first signal at boundary h, per path
+  rl_at <- function(h) {
+    vapply(seq_len(n_sim), function(k) {
+      v <- rec_val[[k]]
+      i <- which.max(v >= h)
+      if (length(v) == 0 || v[i] < h) max_cases else rec_idx[[k]][i]
+    }, numeric(1))
+  }
+
+  # ARL is monotone increasing in h, so bisect
+  lo <- 1e-6
+  hi <- max(vapply(rec_val, function(v) if (length(v)) max(v) else 0, numeric(1)))
+  if (hi <= lo) stop("calibrate_h(): simulation produced no CUSUM excursions.")
+
+  for (i in seq_len(40)) {
+    mid <- (lo + hi) / 2
+    if (mean(rl_at(mid)) < target_arl) lo <- mid else hi <- mid
+  }
+  h <- (lo + hi) / 2
+
+  rl <- rl_at(h)
+  achieved <- mean(rl)
+  attr(h, "arl0")             <- achieved
+  attr(h, "censored")         <- mean(rl >= max_cases)
+  attr(h, "events_to_signal") <- ceiling(h / mean(s_event))
+
+  # The CUSUM is a discrete process: at low p0 a single event moves the
+  # statistic by ~log(OR), so ARLs below roughly 1/mean(p0) are unreachable at
+  # any h. Say so rather than returning a boundary that silently misses the
+  # target — that was the failure mode of the lookup table this replaces.
+  if (abs(achieved - target_arl) / target_arl > 0.2) {
+    warning(
+      "calibrate_h(): closest achievable in-control ARL is ",
+      round(achieved), ", not the requested ", target_arl,
+      ". At mean p0 = ", round(mean(p0) * 100, 2),
+      "% the statistic moves in steps of ~", round(mean(s_event), 2),
+      ", so ", attr(h, "events_to_signal"),
+      " event(s) already cross h = ", round(h, 3), ".",
+      call. = FALSE
+    )
+  }
+  if (attr(h, "censored") > 0.05) {
+    warning(
+      "calibrate_h(): ", round(attr(h, "censored") * 100),
+      "% of simulated in-control series never signalled within ",
+      max_cases, " cases; the reported ARL is a lower bound.",
+      call. = FALSE
+    )
+  }
+
+  .h_cache[[key]] <- h
   h
+}
+
+# Calibration is the slow step and is repeated across specialties, divisions
+# and the report/slides pair, so memoise on the p0 *distribution* (which is
+# what the simulation actually consumes) rather than the case order.
+.h_cache <- new.env(hash = TRUE, parent = emptyenv())
+
+.h_cache_key <- function(p0, odds_ratio, target_arl, n_sim) {
+  tb <- table(sprintf("%.6f", p0))
+  paste(
+    paste(names(tb), as.integer(tb), sep = ":", collapse = "|"),
+    odds_ratio, target_arl, n_sim, sep = "//"
+  )
 }
 
 
@@ -100,19 +244,31 @@ plot_cusum <- function(cusum_data, specialty_name, complication_name,
                        assessment = NA, sar_oe = NA, sar_percentile = NA) {
   
   h_val     <- cusum_data$h[1]
-  p0_pct    <- round(cusum_data$p0[1] * 100, 2)
-  p1_pct    <- round(cusum_data$p1[1] * 100, 2)
   n_events  <- sum(cusum_data$outcome)
   n_cases   <- nrow(cusum_data)
   obs_rate  <- round(n_events / n_cases * 100, 2)
   n_signals <- sum(cusum_data$signal)
+
+  # p0/p1 vary by case when procedure-matched benchmarks are in play
+  p0_vals  <- cusum_data$p0
+  p0_mixed <- length(unique(round(p0_vals, 8))) > 1
+  p0_pct   <- round(mean(p0_vals) * 100, 2)
+  p1_pct   <- round(mean(cusum_data$p1) * 100, 2)
   
   plot_df <- cusum_data
   if (!is.null(dates)) plot_df$date <- dates
   
   # Build subtitle
+  p0_txt <- if (p0_mixed) {
+    paste0("p\u2080 = ", p0_pct, "% mean (",
+           round(min(p0_vals) * 100, 2), "\u2013",
+           round(max(p0_vals) * 100, 2), "%)")
+  } else {
+    paste0("p\u2080 = ", p0_pct, "%")
+  }
+
   sub_parts <- paste0(
-    "p\u2080 = ", p0_pct, "%  |  p\u2081 = ", p1_pct,
+    p0_txt, "  |  p\u2081 = ", p1_pct,
     "%  |  Observed: ", obs_rate, "% (", n_events, "/", n_cases, ")"
   )
   
@@ -123,6 +279,20 @@ plot_cusum <- function(cusum_data, specialty_name, complication_name,
     sub_parts <- paste0(sub_parts, "  |  Benchmark: ALLCASES (no specialty model)")
   }
   
+  # Calibration line: what this boundary actually delivers. An ARL in cases is
+  # a weak guarantee for a rare complication, so state the event count that
+  # trips the chart alongside it.
+  arl0 <- attr(cusum_data, "arl0")
+  ev2  <- attr(cusum_data, "events_to_signal")
+  if (!is.null(arl0) && !is.null(ev2)) {
+    sub_parts <- paste0(
+      sub_parts, "\nh = ", round(h_val, 2),
+      " (ARL\u2080 \u2248 ", format(round(arl0), big.mark = ","),
+      " cases; signals on ", ev2, " event", ifelse(ev2 == 1, "", "s"),
+      " in quick succession)"
+    )
+  }
+
   # SAR assessment badge
   if (!is.na(assessment)) {
     sar_info <- paste0("SAR: ", assessment)
@@ -239,7 +409,8 @@ plot_oe_trend <- function(ot_data, complication_name) {
 #' @param div Optional division name (NULL for all cases in specialty)
 #' @return A named list of ggplot objects
 generate_specialty_charts <- function(data, spec, rates, odds_ratio = 2.0,
-                                      div = NULL) {
+                                      div = NULL, targeted_rates = NULL,
+                                      target_arl = 500) {
   
   spec_data <- data |> filter(specialty == spec) |> arrange(op_date)
   if (!is.null(div) && nchar(div) > 0) {
@@ -276,25 +447,40 @@ generate_specialty_charts <- function(data, spec, rates, odds_ratio = 2.0,
     rate_info <- rates |> filter(specialty == spec, complication == comp_label)
     if (nrow(rate_info) == 0 || is.na(rate_info$p0)) next
     
-    p0 <- rate_info$p0
-    if (p0 < 0.0001) {
+    # Per-case p0: the most specific SAR model that applies to each case,
+    # falling back to the specialty model. Passing targeted_rates = NULL
+    # reproduces the previous single-rate behaviour.
+    case_p0 <- build_case_p0(
+      case_data       = spec_data,
+      comp_label      = comp_label,
+      spec            = spec,
+      benchmark_rates = rates,
+      targeted_rates  = targeted_rates
+    )
+
+    if (all(is.na(case_p0$p0)) || mean(case_p0$p0, na.rm = TRUE) < 0.0001) {
       message("  Skipping ", comp_label, " for ", spec, " (rate < 0.01%)")
       next
     }
-    
+    # A case with no usable benchmark falls back to the mean rather than
+    # dropping out, so the case series stays chronologically intact.
+    case_p0$p0[is.na(case_p0$p0)] <- mean(case_p0$p0, na.rm = TRUE)
+
     outcomes <- spec_data[[var_name]]
-    
-    message("  CUSUM: ", display_name, " — ", comp_label,
-            " (p0=", round(p0*100, 2), "%, events=", sum(outcomes),
+
+    message("  CUSUM: ", display_name, " \u2014 ", comp_label,
+            " (", describe_case_p0(case_p0), ", events=", sum(outcomes),
             "/", length(outcomes), ")")
-    
+
     cusum_result <- compute_cusum(
       outcomes   = outcomes,
-      p0         = p0,
+      p0         = case_p0$p0,
       odds_ratio = odds_ratio,
       h          = NULL,
-      reset      = TRUE
+      reset      = TRUE,
+      target_arl = target_arl
     )
+    attr(cusum_result, "cohort_mix") <- case_p0$mix
     
     # Extract SAR context
     assessment     <- if ("assessment" %in% names(rate_info)) rate_info$assessment else NA

@@ -9,6 +9,10 @@
 .quarto/
 # Output (regenerated)
 output/*.pdf
+# Triage carry-over state — derived counts by division, regenerated each run
+output/*.csv
+# Cached report data — derived from data/, so treat as PHI-bearing
+.cache/
 # Data files (contain PHI — do not commit)
 data/*.xlsx
 data/*.csv

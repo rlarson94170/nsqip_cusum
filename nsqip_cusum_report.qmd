@@ -30,6 +30,7 @@ params:
   site_sar_file: "data/SAR_Site_Summary.xlsx"
   surgeon_mapping_file: "data/surgeon_division_mapping.csv"
   benchmark_type: "site_expected"
+  specialties: ["General Surgery", "Vascular", "Thoracic", "Plastics"]
   odds_ratio: 2.0
   target_arl: 500
 execute:
@@ -44,6 +45,8 @@ execute:
 source("R/benchmarks.R")
 source("R/data_processing.R")
 source("R/cusum_functions.R")
+source("R/triage.R")
+source("R/load_report_data.R")
 
 library(knitr)
 library(kableExtra)
@@ -54,42 +57,23 @@ options(readxl.show_progress = FALSE)
 ```{r load-data}
 #| include: false
 
-case_data <- process_case_details(
-  filepath    = params$data_file,
-  specialties = c("General Surgery", "Vascular", "Thoracic", "Plastics")
+# Shared with the slide renderer; see R/load_report_data.R
+bundle <- load_report_data(
+  data_file            = params$data_file,
+  site_sar_file        = params$site_sar_file,
+  surgeon_mapping_file = params$surgeon_mapping_file,
+  benchmark_type       = params$benchmark_type,
+  specialties          = unlist(params$specialties)
 )
 
-# Load surgeon mapping and assign divisions
-mapping_file <- params$surgeon_mapping_file
-if (nchar(mapping_file) > 0 && file.exists(mapping_file)) {
-  surgeon_map <- load_surgeon_mapping(mapping_file)
-  case_data <- assign_divisions(case_data, surgeon_map)
-} else {
-  case_data$division <- NA_character_
-}
+case_data          <- bundle$case_data
+benchmark_rates    <- bundle$benchmark_rates
+targeted_data      <- bundle$targeted_data
+ot_data            <- bundle$ot_data
+site_sar_available <- bundle$site_sar_available
 
-# Classify procedures
-case_data <- assign_procedure_categories(case_data)
-
-# Determine if site SAR is available
-site_sar_available <- nchar(params$site_sar_file) > 0 && file.exists(params$site_sar_file)
-
-benchmark_rates <- get_benchmark_rates(
-  site_sar_path  = if (site_sar_available) params$site_sar_file else NULL,
-  benchmark_type = params$benchmark_type
-)
-
-# Load over-time data if available
-ot_data <- NULL
-if (site_sar_available) {
-  ot_data <- tryCatch(parse_over_time(params$site_sar_file), error = function(e) NULL)
-}
-
-# Load targeted SAR data if available
-targeted_data <- NULL
-if (site_sar_available) {
-  targeted_data <- tryCatch(parse_targeted_sar(params$site_sar_file), error = function(e) NULL)
-}
+# Risk-adjusted targeted rates belong only in site_expected mode
+targeted_p0 <- targeted_for_mode(bundle, params$benchmark_type)
 
 spec <- params$specialty
 div  <- if (nchar(params$division) > 0) params$division else NULL
@@ -133,16 +117,89 @@ in **`r report_name`** using site-level NSQIP case data.
 
 Each chart tracks one complication using a Bernoulli CUSUM:
 
-- **p~0~ (benchmark rate):** `r if (params$benchmark_type == "site_expected") "Risk-adjusted expected rate for this site's case mix, derived from the SAR hierarchical model. Where unavailable, the national observed rate is used." else "National observed rate for this specialty from the SAR."``r if (!is.null(div)) " Note: benchmarks reflect the overall specialty model, not division-specific case mix."`
+- **p~0~ (benchmark rate):** `r if (params$benchmark_type == "site_expected") "Risk-adjusted expected rate for this site's case mix, derived from the SAR hierarchical model. Where unavailable, the national observed rate is used." else "National observed rate for this specialty from the SAR."``r if (!is.null(div)) " Benchmarks are assigned per case: the matching targeted procedure model (e.g. Colectomy, Proctectomy) where one exists, otherwise the specialty model."`
 - **p~1~ (detection target):** Rate corresponding to an odds ratio of
   `r params$odds_ratio`$\times$ relative to p~0~.
-- **h (decision boundary):** Calibrated for ARL~0~ $\approx$ `r params$target_arl`.
+- **h (decision boundary):** Simulated at render time for ARL~0~ $\approx$
+  `r params$target_arl` cases against this chart's own p~0~ mix. Each chart
+  subtitle reports the ARL achieved and how many events in quick succession
+  trip it.
 - **Signal ($\blacktriangle$):** CUSUM crossed h; chart resets to zero.
 - **Events (|):** Orange tick marks show individual complication occurrences.
 - **Title color:** \textcolor{sigred}{Red} = SAR "Needs Improvement";
   \textcolor{okgreen}{Green} = SAR "Exemplary"; Black = "As Expected" or no SAR model.
 
-**Key limitations:** `r if (params$benchmark_type == "site_expected") "While the benchmark rates are risk-adjusted, the CUSUM chart itself monitors the raw (unadjusted) event stream against those expected rates. Changes in case mix during the monitoring period are not dynamically accounted for." else "These charts use unadjusted rates. Case mix differences from the national average will affect interpretation."``r if (!is.null(div)) " Division-level reports use the overall specialty benchmark; case mix within a division may differ substantially from the specialty average."` PATOS exclusions are applied per SAR methodology. Intended for internal QI monitoring, not formal profiling.
+**Key limitations:** `r if (params$benchmark_type == "site_expected") "While the benchmark rates are risk-adjusted, the CUSUM chart itself monitors the raw (unadjusted) event stream against those expected rates. Changes in case mix during the monitoring period are not dynamically accounted for." else "These charts use unadjusted rates. Case mix differences from the national average will affect interpretation."``r if (!is.null(div)) " Division reports benchmark each case against the most specific SAR model available; procedures with no targeted model fall back to the specialty rate."` PATOS exclusions are applied per SAR methodology. Intended for internal QI monitoring, not formal profiling.
+
+\newpage
+
+# Chart Review Priorities
+
+```{r triage}
+#| results: asis
+
+triage <- build_triage(
+  data            = case_data,
+  spec            = spec,
+  div             = div,
+  benchmark_rates = benchmark_rates,
+  targeted_rates  = targeted_p0,
+  odds_ratio      = params$odds_ratio,
+  target_arl      = params$target_arl
+)
+triage <- annotate_carryover(triage, spec, div)
+
+cat("A complication is listed for review only when the cumulative rate is",
+    "elevated (at least", TRIAGE_MIN_EVENTS, "events and one-sided p <",
+    TRIAGE_ALPHA, "against expected) or the CUSUM shows recent clustering.",
+    "A CUSUM signal on its own, where observed events are at or below",
+    "expected, reflects clustering rather than excess and is not listed.\n\n")
+
+flagged <- if (!is.null(triage)) triage |> filter(tier > 0) else NULL
+
+if (is.null(flagged) || nrow(flagged) == 0) {
+  cat("**No complication met the review threshold this period.**\n\n")
+} else {
+  tbl <- flagged |>
+    transmute(
+      Priority       = tier_label,
+      Complication   = complication,
+      Obs            = observed,
+      Exp            = expected,
+      `O/E`          = oe,
+      `p`            = p_value,
+      `CUSUM`        = ifelse(cusum_signal, "yes", "--"),
+      Status         = status
+    )
+  print(kable(tbl, format = "latex", booktabs = TRUE, linesep = "",
+              caption = "Complications meeting the review threshold") |>
+        kable_styling(latex_options = c("hold_position"), font_size = 9))
+  cat("\n\n")
+}
+
+# Sensitivity floor, so "nothing flagged" is interpretable
+if (!is.null(triage)) {
+  floor_tbl <- triage |>
+    filter(!is.na(need_events)) |>
+    arrange(desc(fold)) |>
+    transmute(
+      Complication = complication,
+      Exp          = expected,
+      Obs          = observed,
+      `Events to flag` = need_events,
+      `= fold excess`  = fold
+    )
+  cat("## What this report could have detected\n\n")
+  cat("With", n_cases,
+      "cases in this window, the counts below are what each",
+      "complication would have needed to flag. A complication with a high",
+      "fold value is one where absence of a flag says little.\n\n")
+  print(kable(floor_tbl, format = "latex", booktabs = TRUE, linesep = "",
+              caption = "Detection floor for this reporting window") |>
+        kable_styling(latex_options = c("hold_position"), font_size = 8))
+  cat("\n\n")
+}
+```
 
 \newpage
 
@@ -332,7 +389,9 @@ charts <- generate_specialty_charts(
   spec       = spec,
   rates      = benchmark_rates,
   odds_ratio = params$odds_ratio,
-  div        = div
+  div        = div,
+  targeted_rates = targeted_p0,
+  target_arl = params$target_arl
 )
 ```
 

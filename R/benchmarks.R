@@ -309,6 +309,31 @@ TARGETED_PROC_MAP <- c(
 )
 
 
+# Map targeted SAR complication names to the standard COMPLICATIONS labels.
+# The targeted sheets spell out "Ventilator > 48 Hours" where the rest of the
+# project uses "Ventilator > 48h". Entries mapping to NA are not binary
+# complications (Length of Stay) or have no specialty-level counterpart.
+TARGETED_COMP_STD <- c(
+  "Mortality"             = "Mortality",
+  "Morbidity"             = "Morbidity",
+  "Cardiac"               = "Cardiac",
+  "Pneumonia"             = "Pneumonia",
+  "Unplanned Intubation"  = "Unplanned Intubation",
+  "Ventilator > 48 Hours" = "Ventilator > 48h",
+  "VTE"                   = "VTE",
+  "Renal Failure"         = "Renal Failure",
+  "UTI"                   = "UTI",
+  "SSI"                   = "SSI",
+  "Sepsis"                = "Sepsis",
+  "C.diff Colitis"        = "C.diff Colitis",
+  "Unplanned Reoperation" = "Unplanned Reoperation",
+  "Unplanned Readmission" = "Unplanned Readmission",
+  "Anastomotic Leak"      = NA_character_,
+  "Prolonged NPO/NGT Use" = NA_character_,
+  "Length of Stay"        = NA_character_
+)
+
+
 #' Parse Targeted SAR data from the Site Summary file
 #'
 #' @param sar_file Path to SAR_Site_Summary.xlsx
@@ -375,6 +400,7 @@ parse_targeted_sar <- function(sar_file) {
         targeted_procedure = proc_name,
         procedure_category = as.character(proc_cat),
         complication       = comp_name,
+        complication_std   = unname(TARGETED_COMP_STD[comp_name]),
         n_cases            = as.integer(raw$`Total Cases`[i]),
         obs_rate           = as.numeric(raw$`Observed Rate`[i]),
         exp_rate           = as.numeric(raw$`Expected Rate`[i]),
@@ -445,4 +471,113 @@ build_targeted_summary <- function(targeted_data, case_data, spec, div = NULL) {
       Pctl         = pctl,
       Assessment   = assessment
     )
+}
+
+
+# =============================================================================
+# Case-Level (Procedure-Matched) Benchmarks
+#
+# The specialty SAR model is not the right p0 for every case in a specialty.
+# NSQIP publishes procedure-defined targeted models (Colectomy, Proctectomy)
+# whose expected rates differ substantially from the parent specialty model —
+# e.g. site expected SSI is 3.90% for GEN, 5.88% for Colectomy and 13.95% for
+# Proctectomy. Because colorectal procedures are performed by several
+# divisions, benchmarking per report (by division) cannot express this;
+# benchmarking per case can.
+#
+# build_case_p0() assigns each case the expected rate of the most specific
+# SAR model that applies to it, falling back to the specialty model. The
+# result feeds compute_cusum() as a vector p0 (risk-adjusted CUSUM,
+# Steiner et al., Biostatistics 2000).
+# =============================================================================
+
+#' Build a per-case p0 vector for one complication
+#'
+#' @param case_data Case data for the cases being charted, in chronological
+#'   order. Must contain `procedure_category`.
+#' @param comp_label Standard complication label (one of COMPLICATIONS)
+#' @param spec Specialty name
+#' @param benchmark_rates Specialty-level rates from get_benchmark_rates()
+#' @param targeted_rates Targeted SAR from parse_targeted_sar(), or NULL to
+#'   use the specialty rate for every case (the pre-existing behaviour)
+#' @return A list with:
+#'   \describe{
+#'     \item{p0}{numeric vector, one expected rate per case}
+#'     \item{cohort}{character vector naming the model used for each case}
+#'     \item{mix}{tibble summarising cases and p0 by cohort}
+#'     \item{n_matched}{how many cases got a procedure-specific rate}
+#'   }
+build_case_p0 <- function(case_data, comp_label, spec, benchmark_rates,
+                          targeted_rates = NULL) {
+
+  n <- nrow(case_data)
+
+  spec_row <- benchmark_rates |>
+    filter(specialty == spec, complication == comp_label)
+
+  spec_p0 <- if (nrow(spec_row) > 0) spec_row$p0[1] else NA_real_
+
+  p0     <- rep(spec_p0, n)
+  cohort <- rep(paste0(spec, " (specialty)"), n)
+
+  # Procedure-specific override, where a targeted model exists
+  if (!is.null(targeted_rates) && n > 0 &&
+      "procedure_category" %in% names(case_data)) {
+
+    tr <- targeted_rates |>
+      filter(
+        specialty == spec,
+        !is.na(complication_std),
+        complication_std == comp_label,
+        !is.na(exp_rate),
+        !is.na(procedure_category)
+      )
+
+    if (nrow(tr) > 0) {
+      # Several targeted models can share one procedure_category (e.g. Major
+      # and Partial Hepatectomy). Combine them case-weighted.
+      lut <- tr |>
+        summarise(
+          exp_rate = stats::weighted.mean(exp_rate, pmax(n_cases, 1), na.rm = TRUE),
+          label    = paste(sort(unique(targeted_procedure)), collapse = " / "),
+          .by      = procedure_category
+        )
+
+      idx <- match(case_data$procedure_category, lut$procedure_category)
+      hit <- !is.na(idx)
+
+      p0[hit]     <- lut$exp_rate[idx[hit]]
+      cohort[hit] <- paste0(lut$label[idx[hit]], " (targeted)")
+    }
+  }
+
+  mix <- tibble(cohort = cohort, p0 = p0) |>
+    summarise(n = n(), p0 = dplyr::first(p0), .by = cohort) |>
+    arrange(desc(n))
+
+  list(
+    p0        = p0,
+    cohort    = cohort,
+    mix       = mix,
+    n_matched = sum(!grepl("\\(specialty\\)$", cohort))
+  )
+}
+
+
+#' One-line description of a case-level p0 vector, for chart subtitles
+#'
+#' @param cp Output of build_case_p0()
+#' @return A character string
+describe_case_p0 <- function(cp) {
+  if (all(is.na(cp$p0))) return("p₀ unavailable")
+  if (cp$n_matched == 0) {
+    return(paste0("p₀ = ", round(cp$p0[1] * 100, 2), "%"))
+  }
+  wm <- mean(cp$p0, na.rm = TRUE)
+  paste0(
+    "p₀ = ", round(wm * 100, 2), "% mean (",
+    round(min(cp$p0, na.rm = TRUE) * 100, 2), "–",
+    round(max(cp$p0, na.rm = TRUE) * 100, 2), "%, ",
+    cp$n_matched, "/", length(cp$p0), " procedure-matched)"
+  )
 }

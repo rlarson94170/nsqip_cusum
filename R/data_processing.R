@@ -10,47 +10,150 @@ library(dplyr)
 library(lubridate)
 library(tidyr)
 
-#' Read and process the NSQIP Case Details Report
+# Every column the derivation reads. NSQIP renames columns between releases,
+# and without this check a rename surfaces as an opaque failure deep inside the
+# transmute below rather than as "this column is missing".
+REQUIRED_CASE_COLUMNS <- c(
+  # Filtering and identifiers
+  "Completion Status", "Surgical Specialty", "Operation Date",
+  "Case Number", "LMRN", "Attending/Staff Surgeon",
+  "CPT Code", "CPT Description", "Age at Time of Surgery",
+  "ASA Classification", "Hospital Length of Stay",
+  # Readmission detail
+  "# of Readmissions likely related to Primary Procedure",
+  "# of Readmissions likely unrelated to Primary Procedure",
+  "# of Unplanned Readmissions", "Total # of Unplanned Returns to OR",
+  # Targeted module flags and their procedure-specific outcomes
+  "Colectomy Primary Indication for Surgery",
+  "Proctectomy Preop Patient Marked for Stoma",
+  "Colectomy Postop Anastomotic Leak", "Proctectomy Postop Anastomotic Leak",
+  "Colectomy Prolonged Postoperative NPO or NGT Use",
+  "Proctectomy Prolonged Postoperative NPO or NGT Use",
+  # Mortality
+  "Postop Death w/in 30 days of Procedure",
+  # Occurrences, each paired with its PATOS counterpart where one exists
+  "# of Postop Superficial Incisional SSI",
+  "# of Postop Superficial Incisional SSI PATOS",
+  "# of Postop Deep Incisional SSI", "# of Postop Deep Incisional SSI PATOS",
+  "# of Postop Organ/Space SSI", "# of Postop Organ/Space SSI PATOS",
+  "# of Postop Pneumonia", "# of Postop Pneumonia PATOS",
+  "# of Postop On Ventilator > 48 hours",
+  "# of Postop On Ventilator > 48 hours PATOS",
+  "# of Postop UTI", "# of Postop UTI PATOS",
+  "# of Postop Sepsis", "# of Postop Sepsis PATOS",
+  "# of Postop Septic Shock", "# of Postop Septic Shock PATOS",
+  "# of Postop Unplanned Intubation", "# of Postop Renal Insufficiency",
+  "# of Postop Dialysis", "# of Cardiac Arrest Requiring CPR",
+  "# of Myocardial Infarction", "# of Postop Pulmonary Embolism",
+  "# of Postop Venous Thrombosis Requiring Therapy",
+  "# of Postop Wound Disruption",
+  "# of Stroke/Cerebral Vascular Accident (CVA)", "# of Postop C. diff"
+)
+
+# Complications excluded when Present At Time Of Surgery, per SAR methodology
+PATOS_PAIRS <- c(
+  "# of Postop Superficial Incisional SSI",
+  "# of Postop Deep Incisional SSI",
+  "# of Postop Organ/Space SSI",
+  "# of Postop Pneumonia",
+  "# of Postop On Ventilator > 48 hours",
+  "# of Postop UTI",
+  "# of Postop Sepsis",
+  "# of Postop Septic Shock"
+)
+
+
+#' Read the raw Case Details Report
+#'
+#' Kept separate from the derivation so the derivation can be exercised
+#' without an xlsx — every real Case Details file contains PHI, so none can
+#' serve as a test fixture.
 #'
 #' @param filepath Path to the Case Details Report .xlsx file
+#' @return The raw `report_data` sheet as a tibble
+read_case_details <- function(filepath) {
+  if (!file.exists(filepath)) {
+    stop("Case Details file not found: ", filepath)
+  }
+  read_excel(filepath, sheet = "report_data")
+}
+
+
+#' Derive case-level indicators from a raw Case Details frame
+#'
+#' Filters to completed cases in the target specialties, parses the operation
+#' date, and derives every binary complication indicator, applying the PATOS
+#' exclusions and the SAR composite definitions.
+#'
+#' @param raw Raw Case Details data, as returned by read_case_details()
 #' @param specialties Character vector of specialties to include
-#' @return A tibble with one row per case, columns for identifiers, dates,
-#'         specialty, and binary (0/1) complication indicators
-process_case_details <- function(
-    filepath,
-    specialties = c("General Surgery", "Vascular", "Thoracic", "Plastics")
+#' @param quiet Suppress the progress messages
+#' @return A tibble with one row per retained case
+derive_case_indicators <- function(
+    raw,
+    specialties = c("General Surgery", "Vascular", "Thoracic", "Plastics"),
+    quiet = FALSE
 ) {
-  
-  message("Reading Case Details Report: ", filepath)
-  raw <- read_excel(filepath, sheet = "report_data")
-  message("  Total cases in file: ", nrow(raw))
-  
+
+  say <- function(...) if (!quiet) message(...)
+
+  missing_cols <- setdiff(REQUIRED_CASE_COLUMNS, names(raw))
+  if (length(missing_cols) > 0) {
+    stop(
+      "Case Details data is missing ", length(missing_cols), " required ",
+      "column(s):\n  ", paste(missing_cols, collapse = "\n  "),
+      "\n\nNSQIP renames columns between releases. Compare the headings in ",
+      "the\n'report_data' sheet against REQUIRED_CASE_COLUMNS in ",
+      "R/data_processing.R."
+    )
+  }
+
   # --- Filter to target specialties and completed cases ---
   df <- raw |>
     filter(
       `Completion Status` == "Complete",
       `Surgical Specialty` %in% specialties
     )
-  message("  Cases after filtering (complete, target specialties): ", nrow(df))
-  
+  say("  Cases after filtering (complete, target specialties): ", nrow(df))
+
   # --- Parse operation date ---
   df <- df |>
     mutate(
       op_date = mdy(`Operation Date`)
     ) |>
     arrange(op_date)
-  
+
   # --- Helper: safe numeric conversion (handles NA, character "0"/"1") ---
   safe_binary <- function(x) {
     as.integer(as.numeric(x) > 0)
   }
-  
+
+  # --- Helper: apply a PATOS exclusion to an occurrence ---
+  # A blank PATOS field means "not present at time of surgery". Comparing it
+  # with == 0 yields NA, which the trailing replace_na() then turned into 0 --
+  # silently discarding a real occurrence. Treat missing as not-PATOS instead.
+  not_patos <- function(event, patos) {
+    as.integer(
+      ifelse(is.na(event), 0L, event) == 1L &
+      ifelse(is.na(patos), 0L, patos) == 0L
+    )
+  }
+
+  # --- Helper: preserve an MRN exactly as recorded ---
+  # as.integer() dropped leading zeros, so "00123456" was written to the case
+  # list as "123456" and would not be found in the chart system.
+  as_mrn <- function(x) {
+    if (is.character(x)) return(trimws(x))
+    ifelse(is.na(x), NA_character_,
+           trimws(format(x, scientific = FALSE, trim = TRUE)))
+  }
+
   # --- Derive binary complication indicators ---
   processed <- df |>
     transmute(
       # Identifiers
       case_id    = `Case Number`,
-      lmrn       = as.character(as.integer(`LMRN`)),
+      lmrn       = as_mrn(`LMRN`),
       op_date    = op_date,
       specialty  = `Surgical Specialty`,
       surgeon    = `Attending/Staff Surgeon`,
@@ -96,10 +199,10 @@ process_case_details <- function(
       stroke_cva_ind      = safe_binary(`# of Stroke/Cerebral Vascular Accident (CVA)`),
       
       # PATOS-adjusted dashboard sub-indicators
-      d_ssi_superficial = as.integer(ssi_superficial_raw == 1 & ssi_superficial_pat == 0),
-      d_ssi_deep        = as.integer(ssi_deep_raw == 1 & ssi_deep_pat == 0),
-      d_ssi_organ       = as.integer(ssi_organ_raw == 1 & ssi_organ_pat == 0),
-      d_septic_shock    = as.integer(septic_shock_raw == 1 & septic_shock_pat == 0),
+      d_ssi_superficial = not_patos(ssi_superficial_raw, ssi_superficial_pat),
+      d_ssi_deep        = not_patos(ssi_deep_raw, ssi_deep_pat),
+      d_ssi_organ       = not_patos(ssi_organ_raw, ssi_organ_pat),
+      d_septic_shock    = not_patos(septic_shock_raw, septic_shock_pat),
       
       # ---- Individual complication indicators ----
       
@@ -115,7 +218,7 @@ process_case_details <- function(
       # 3. Pneumonia (exclude PATOS)
       pneumonia_raw  = safe_binary(`# of Postop Pneumonia`),
       pneumonia_patos = safe_binary(`# of Postop Pneumonia PATOS`),
-      pneumonia = as.integer(pneumonia_raw == 1 & pneumonia_patos == 0),
+      pneumonia = not_patos(pneumonia_raw, pneumonia_patos),
       
       # 4. Unplanned Intubation
       unplanned_intubation = safe_binary(`# of Postop Unplanned Intubation`),
@@ -123,7 +226,7 @@ process_case_details <- function(
       # 5. Ventilator > 48 Hours (exclude PATOS)
       vent48_raw   = safe_binary(`# of Postop On Ventilator > 48 hours`),
       vent48_patos = safe_binary(`# of Postop On Ventilator > 48 hours PATOS`),
-      vent48 = as.integer(vent48_raw == 1 & vent48_patos == 0),
+      vent48 = not_patos(vent48_raw, vent48_patos),
       
       # 6. VTE: Pulmonary embolism + Venous thrombosis (SAR definition 4)
       vte = as.integer(
@@ -140,7 +243,7 @@ process_case_details <- function(
       # 8. UTI (exclude PATOS)
       uti_raw   = safe_binary(`# of Postop UTI`),
       uti_patos = safe_binary(`# of Postop UTI PATOS`),
-      uti = as.integer(uti_raw == 1 & uti_patos == 0),
+      uti = not_patos(uti_raw, uti_patos),
       
       # 9. SSI: Superficial + Deep + Organ/Space (SAR definition 6)
       #    Exclude PATOS for organ/space (and superficial if PATOS exists)
@@ -151,16 +254,16 @@ process_case_details <- function(
       ssi_organ           = safe_binary(`# of Postop Organ/Space SSI`),
       ssi_organ_patos     = safe_binary(`# of Postop Organ/Space SSI PATOS`),
       ssi = as.integer(
-        (ssi_superficial == 1 & ssi_superficial_pat == 0) |
-        (ssi_deep == 1 & ssi_deep_patos == 0) |
-        (ssi_organ == 1 & ssi_organ_patos == 0)
+        not_patos(ssi_superficial, ssi_superficial_pat) == 1L |
+        not_patos(ssi_deep, ssi_deep_patos) == 1L |
+        not_patos(ssi_organ, ssi_organ_patos) == 1L
       ),
       
       # 10. Sepsis: Worsening sepsis/septic shock (SAR definition 7)
       #     Exclude PATOS
       sepsis_raw   = safe_binary(`# of Postop Sepsis`),
       sepsis_patos = safe_binary(`# of Postop Sepsis PATOS`),
-      sepsis = as.integer(sepsis_raw == 1 & sepsis_patos == 0),
+      sepsis = not_patos(sepsis_raw, sepsis_patos),
       
       # 11. C.diff Colitis
       cdiff = safe_binary(`# of Postop C. diff`),
@@ -225,16 +328,37 @@ process_case_details <- function(
   )
   processed <- processed |>
     mutate(across(all_of(complication_cols), ~replace_na(., 0L)))
-  
-  message("  Date range: ", min(processed$op_date, na.rm = TRUE),
-          " to ", max(processed$op_date, na.rm = TRUE))
-  message("  Cases by specialty:")
-  for (s in specialties) {
-    n <- sum(processed$specialty == s)
-    message("    ", s, ": ", n)
+
+  if (nrow(processed) > 0) {
+    say("  Date range: ", min(processed$op_date, na.rm = TRUE),
+        " to ", max(processed$op_date, na.rm = TRUE))
+    say("  Cases by specialty:")
+    for (s in specialties) {
+      say("    ", s, ": ", sum(processed$specialty == s))
+    }
   }
-  
+
   processed
+}
+
+
+#' Read and process the NSQIP Case Details Report
+#'
+#' Thin orchestration over read_case_details() and derive_case_indicators().
+#'
+#' @param filepath Path to the Case Details Report .xlsx file
+#' @param specialties Character vector of specialties to include
+#' @return A tibble with one row per case, columns for identifiers, dates,
+#'         specialty, and binary (0/1) complication indicators
+process_case_details <- function(
+    filepath,
+    specialties = c("General Surgery", "Vascular", "Thoracic", "Plastics")
+) {
+  message("Reading Case Details Report: ", filepath)
+  raw <- read_case_details(filepath)
+  message("  Total cases in file: ", nrow(raw))
+
+  derive_case_indicators(raw, specialties = specialties)
 }
 
 #' Map internal complication variable names to display labels
@@ -772,19 +896,23 @@ build_dashboard <- function(data, spec, div = NULL, benchmark_rates = NULL) {
   n_total <- nrow(df)
   
   # Create month labels from the data range
-  df <- df |> mutate(month_label = format(op_date, "%b"))
-  month_order <- df |>
-    mutate(month_start = floor_date(op_date, "month")) |>
-    distinct(month_start) |>
-    arrange(month_start) |>
-    mutate(label = format(month_start, "%b")) |>
-    pull(label)
-  
-  # Monthly case counts
-  monthly_n <- df |>
-    mutate(month_label = factor(month_label, levels = month_order)) |>
-    count(month_label, .drop = FALSE) |>
-    pull(n, name = month_label)
+  # Months are keyed on the month's start date, never on the label. A "%b"
+  # label alone collides once the window exceeds twelve months ("Jan" from two
+  # different years), which silently merged their counts into one column.
+  # The year is shown whenever the window crosses a calendar year, so a label
+  # is never ambiguous to a reader either.
+  df <- df |> mutate(month_start = floor_date(op_date, "month"))
+
+  month_starts <- sort(unique(df$month_start))
+  multi_year   <- length(unique(format(month_starts, "%Y"))) > 1
+  month_order  <- format(month_starts, if (multi_year) "%b %y" else "%b")
+
+  # Monthly case counts, matched on the date key
+  monthly_n <- vapply(
+    month_starts, function(ms) sum(df$month_start == ms, na.rm = TRUE),
+    integer(1)
+  )
+  names(monthly_n) <- month_order
   
   # Build each row
   rows <- list()
@@ -816,10 +944,11 @@ build_dashboard <- function(data, spec, div = NULL, benchmark_rates = NULL) {
       rate_val <- NA_real_
     } else {
       # Complication row: count events per month
-      monthly_vals <- sapply(month_order, function(m) {
-        month_df <- df |> filter(month_label == m)
-        sum(month_df[[col_name]], na.rm = TRUE)
-      })
+      monthly_vals <- vapply(
+        month_starts,
+        function(ms) sum(df[[col_name]][df$month_start == ms], na.rm = TRUE),
+        numeric(1)
+      )
       total_val <- sum(df[[col_name]], na.rm = TRUE)
       rate_val <- round(total_val / n_total * 100, 1)
     }
