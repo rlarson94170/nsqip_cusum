@@ -440,3 +440,42 @@ Set `render_slides <- FALSE` in `render_reports.R`.
   labelled with the year whenever the window crosses a calendar year, so a
   window longer than twelve months does not merge same-named months
 - **Intended for internal QI** — not a substitute for official SAR profiling
+
+
+## Version History
+
+### v1.5.0 — August 2026
+
+**Reports from this version are not directly comparable to earlier ones.** Two
+changes alter which complications signal, so a chart that was quiet in a prior
+month may signal now, and vice versa — 8 of 66 General Surgery
+chart-complication pairs changed state on the same data. Read a change in
+signalling across this boundary as a change in method, not in performance.
+
+- **CUSUM boundaries recalibrated.** The previous hard-coded lookup table
+  returned h = 4.5 for every p₀ below 4.5%, giving in-control ARLs of
+  4,000–29,000 rather than the documented 500. Most monitored complications
+  sit in that range, so those charts could not realistically signal.
+  Boundaries are now simulated per chart, and `target_arl` and `odds_ratio`
+  genuinely affect them. Effect: rare complications became able to signal.
+- **Benchmarks assigned per case.** Each case is now scored against the most
+  specific SAR model that applies (Colectomy and Proctectomy targeted models
+  where available, specialty model otherwise) rather than one specialty rate
+  for every case in a report. Effect: divisions whose case mix differs from
+  the specialty average — colorectal work especially — shifted most.
+- **Triage replaces the bare CUSUM signal** as the review trigger, and
+  `target_arl` moved from 500 to 1500. Effect: fewer, better-founded flags.
+
+Also fixed in this release: dashboard months no longer merge across years in
+windows over twelve months; blank PATOS fields no longer discard the
+occurrence; MRNs keep their leading zeros; slide-deck charts no longer mangle
+the p₀/p₁ subscripts; and failed renders are reported and exit non-zero
+instead of a partial set being announced as complete.
+
+The two data fixes (PATOS, MRN) changed no values in the August 2026 data —
+no case had a blank PATOS field alongside an occurrence, and no MRN had a
+leading zero. They are correctness fixes for future downloads.
+
+Added: a 265-test suite (`run_tests.R`), shared input loading with an on-disk
+cache, and carry-over tracking so quarterly reports do not prompt duplicate
+chart reviews.
