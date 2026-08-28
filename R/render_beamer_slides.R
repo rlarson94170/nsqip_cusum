@@ -23,6 +23,7 @@ render_beamer_slides <- function(
 
   # ---- Load helpers --------------------------------------------------------
   # (idempotent — safe to re-source)
+  source("R/version.R",          local = FALSE)
   source("R/benchmarks.R",       local = FALSE)
   source("R/data_processing.R",  local = FALSE)
   source("R/cusum_functions.R",  local = FALSE)
@@ -65,7 +66,6 @@ render_beamer_slides <- function(
   case_data          <- bundle$case_data
   benchmark_rates    <- bundle$benchmark_rates
   targeted_data      <- bundle$targeted_data
-  ot_data            <- bundle$ot_data
   site_sar_available <- bundle$site_sar_available
 
   # Risk-adjusted targeted rates belong only in site_expected mode
@@ -130,39 +130,6 @@ render_beamer_slides <- function(
     chart_files[i] <- f
   }
 
-  # O/E trend plots
-  oe_plots <- list()
-  oe_files <- character(0)
-  if (!is.null(ot_data)) {
-    spec_ot <- ot_data |> filter(specialty == spec)
-    if (nrow(spec_ot) > 0) {
-      ni_comps <- benchmark_rates |>
-        filter(specialty == spec, assessment == "Needs Improvement") |>
-        pull(complication)
-      ho_comps <- spec_ot |>
-        filter(is_outlier_high) |> pull(complication) |> unique()
-      priority_comps <- unique(c(ni_comps, ho_comps))
-
-      for (comp in priority_comps) {
-        comp_ot <- spec_ot |> filter(complication == comp) |> arrange(period)
-        if (nrow(comp_ot) >= 2) {
-          p <- plot_oe_trend(comp_ot, comp)
-          if (!is.null(p)) {
-            p <- p + theme(plot.title = element_text(size = 13, face = "bold"),
-                           axis.text = element_text(size = 9),
-                           axis.text.x = element_text(angle = 45, hjust = 1))
-            oe_plots[[comp]] <- p
-          }
-        }
-      }
-      oe_files <- character(length(oe_plots))
-      for (i in seq_along(oe_plots)) {
-        f <- file.path(plot_dir, paste0("oe_", i, ".pdf"))
-        ggsave(f, oe_plots[[i]], width = 9.5, height = 3.0, device = chart_device)
-        oe_files[i] <- f
-      }
-    }
-  }
 
   # ---- Escape helper -------------------------------------------------------
   tex_escape <- function(x) {
@@ -399,35 +366,14 @@ render_beamer_slides <- function(
   add("")
 
   for (i in seq_along(chart_files)) {
-    chart_name <- tex_escape(names(charts)[i])
+    # generate_specialty_charts() keys its list on the column name, so the
+    # frame title read "unplanned_reop" rather than "Unplanned Reoperation".
+    chart_name <- tex_escape(chart_frame_title(names(charts)[i]))
     add("\\begin{frame}{", chart_name, "}")
     add("\\centering")
     add("\\includegraphics[width=\\textwidth]{", chart_files[i], "}")
     add("\\end{frame}")
     add("")
-  }
-
-  # -- O/E Trends --
-  if (length(oe_plots) > 0) {
-    add("\\section{O/E Trends}")
-    add("")
-    for (i in seq_along(oe_plots)) {
-      comp_name <- names(oe_plots)[i]
-      add("\\begin{frame}{O/E Trend: ", comp_name, "}")
-      if (i == 1) {
-        if (!is.null(div_val)) {
-          add("\\small Historical O/E ratios from the \\textbf{",
-              tex_escape(spec), "} SAR model (specialty-level). ",
-              "Red dots = high outlier.\\\\[0.3em]")
-        } else {
-          add("\\small Red dots indicate periods flagged as high outlier.\\\\[0.3em]")
-        }
-      }
-      add("\\centering")
-      add("\\includegraphics[width=\\textwidth]{", oe_files[i], "}")
-      add("\\end{frame}")
-      add("")
-    }
   }
 
   # -- Appendix: Procedure Mix --
@@ -487,7 +433,7 @@ render_beamer_slides <- function(
   add("\\begin{frame}[plain]")
   add("\\begin{center}")
   add("\\vspace{1.5cm}")
-  add("{\\Large\\bfseries\\color{vcublue} NSQIP CUSUM Monitoring System v1.4}")
+  add("{\\Large\\bfseries\\color{vcublue} ", nsqip_version_label(), "}")
   add("")
   add("\\vspace{0.5cm}")
   add("")

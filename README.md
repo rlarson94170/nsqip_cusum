@@ -11,7 +11,8 @@ improvement review.
 1. **Open** `nsqip_cusum.Rproj` in RStudio
 2. **Install** required packages (see below)
 3. **Place files** in the `data/` folder:
-   - `Case_Details_Report.xlsx` — your latest NSQIP case download *(required)*
+   - `Case_Details_Report*.xlsx` — your latest NSQIP case download, under
+     whatever name it arrived with *(required)*
    - `SAR_Site_Summary.xlsx` — your site SAR/ISAR summary *(recommended)*
    - `surgeon_division_mapping.csv` — surgeon-to-division mapping *(for division reports)*
 4. **Run** `source("render_reports.R")`
@@ -25,6 +26,7 @@ nsqip_cusum/
 ├── render_reports.R            # Master script — run this to generate all PDFs
 ├── nsqip_cusum_report.qmd     # Quarto report template (parameterized)
 ├── R/
+│   ├── version.R               # Release version — the one place it is defined
 │   ├── benchmarks.R            # SAR rates: national + site risk-adjusted
 │   ├── data_processing.R       # Case Details ingestion, PATOS, divisions
 │   ├── cusum_functions.R       # CUSUM computation, charts, O/E trends
@@ -70,7 +72,8 @@ column at a benign default; override any column to build a scenario).
 now reports which columns are missing instead of failing obscurely deep in the
 derivation.
 
-Requires `testthat`:
+Requires `testthat` (which brings `withr`, used for the temp-directory and
+locale fixtures):
 
 ```r
 install.packages("testthat")
@@ -162,9 +165,14 @@ Each specialty/division PDF includes the following sections:
 
 ### Chart Review Priorities
 The worklist: which complications, if any, warrant pulling charts this period,
-and whether each is new or carried over from the previous report. Followed by
-a detection-floor table showing what each complication would have needed to
-flag, so that "nothing flagged" can be read correctly. See **Triage** below.
+and whether each is new or carried over from the previous report. Where a
+flagged composite is fully explained by another flag, a note says so, so a
+division does not open two chart reviews on the same patients. Followed by
+**Where the events sit** — for each flagged complication, the CPTs carrying
+the most events with their rates, against a rollup row for the rest of the
+service — and a detection-floor table showing what each complication would
+have needed to flag, so that "nothing flagged" can be read correctly. See
+**Triage** below.
 
 ### SAR Context
 Prior SAR results table with O/E ratios, percentiles, and assessments
@@ -231,9 +239,12 @@ includes:
 - Observed vs. benchmark comparison table
 - Monthly complication dashboard
 - CUSUM charts (one per slide)
-- O/E trend charts for flagged complications
 - Procedure mix profile
 - Targeted SAR benchmark tables (when available)
+
+Decks carry no O/E trend charts. The PDF report still has them, and the
+divisions already receive the same history in the SAR/ISAR reports from NSQIP,
+so repeating it in the deck added length without adding information.
 
 Slides use a 16:9 aspect ratio with institutional color theming (VCU blue/gold).
 Set `render_slides <- FALSE` in `render_reports.R` to skip slide generation.
@@ -258,9 +269,25 @@ generate separate reports for each division within a specialty.
 ## Updating for New Data
 
 ### New Case Details download:
-1. Place the new `.xlsx` in `data/`
-2. Update `data_file` path in `render_reports.R`
-3. Run `source("render_reports.R")`
+1. Drop the new `.xlsx` in `data/` — keep the name NSQIP gave it
+2. Run `source("render_reports.R")`
+
+No renaming and no config edit. `data_file` in `render_reports.R` is a prefix,
+not an exact filename: any `Case_Details_Report*.xlsx` in the folder is
+ingested, whatever NSQIP appended to it. The expected case is one download in
+`data/` at a time, and a lone file is used regardless of its name — nothing in
+the suffix has to parse. The run prints which file it picked and, when the
+name carries a readable date, when it was downloaded.
+
+If more than one is present, ranking is by the date in the filename, newest
+first, with modification time breaking ties. Whatever follows the date is
+ignored. A file with no date at all — a leftover `Case_Details_Report.xlsx`
+from an earlier run — ranks below every dated one, so it can never silently
+win over a fresh download. Excel's `~$` lock files are ignored, so a report
+can be generated while the workbook is open.
+
+To pin a run to a specific download rather than the newest, put its full
+filename in `data_file`; a complete name is a prefix that matches only itself.
 
 ### New SAR/ISAR release:
 1. Place the new site summary in `data/`
@@ -374,6 +401,42 @@ cluster twice. State lives in `output/triage_history.csv` (git-ignored,
 regenerated each run; writes are an upsert keyed on report date and scope, so
 the PDF and slide renders of one report do not double-count).
 
+**Where the events sit.** A flag names a complication, not a place to look.
+For each flagged complication the report lists the CPTs carrying the most
+events, with a rollup row for everything else. Cases are grouped on the raw
+CPT rather than `procedure_category`, because `PROCEDURE_CPT_MAP` covers
+General Surgery only and every case in the other specialties falls through to
+"Other".
+
+Three rules keep the table honest, and all three are load-bearing:
+
+- **Ranked by event count, not rate.** Ranking by rate puts every 1-of-1
+  procedure at the top and buries the concentration worth reviewing.
+- **A CPT needs 2+ events to be listed separately.** One event is a case, not
+  a concentration. Listing singletons also drains the rollup, which is the
+  baseline the listed rows are read against — in the 2026-H1 Plastics data,
+  promoting three singletons moved the rest-of-service rate from 4.3% to 0.0%.
+- **Denominators are shown, never filtered on.** The concentrations that
+  motivated this sat at n = 15 and n = 18, so any floor high enough to make a
+  rate "reliable" would discard the finding.
+
+A complication whose events are all one-offs gets no table, rather than a
+table implying a pattern that is not there. Settings are at the top of
+`R/triage.R` (`FLAG_PROCEDURE_TOP_N`, `FLAG_PROCEDURE_MIN_EV`).
+
+**Composite overlap.** Morbidity is an OR over the individual complications,
+so when SSI is elevated morbidity is elevated too and the worklist shows two
+flags for one problem. Whether that is actually the case is checked rather
+than assumed, and the note is only shown when it is true: in the 2026-H1 data
+Plastics morbidity was entirely SSI ("13 events, all also counted under SSI —
+one chart review, not two"), while General Surgery was about half, leaving a
+block of morbidity events no other flag accounted for. Overlap is measured
+only against complications that *themselves flagged* — the question is whether
+one flag on the worklist subsumes another, not whether the composite is
+definitionally a union, which it always is. Where a composite adds no patients
+at all, its procedure breakdown is suppressed as well, since it would repeat
+the explaining flag's table verbatim.
+
 ### PATOS Exclusions
 
 Per SAR methodology, complications Present at Time of Surgery are excluded
@@ -443,6 +506,52 @@ Set `render_slides <- FALSE` in `render_reports.R`.
 
 
 ## Version History
+
+### v1.5.1 — August 2026
+
+Two additions to the worklist, both aimed at the same thing: making a flag
+tell a division where to look, not just what to look for. No change to which
+complications flag — tiering, gates and boundaries are untouched, so reports
+remain comparable to v1.5.0.
+
+- **Per-flag procedure breakdown.** Each flagged complication now lists the
+  CPTs carrying its events, with rates and a rest-of-service rollup. On the
+  2026-H1 Plastics data this puts 10 of the 13 SSIs into two procedures —
+  breast reduction (5/18, 27.8%) and free-flap breast reconstruction (5/15,
+  33.3%) — against 4.3% for everything else, which was previously invisible
+  in the PDF and could not be surfaced by the Procedure Mix appendix, since
+  `PROCEDURE_CPT_MAP` is General Surgery-only and every Plastics case falls
+  through to "Other". PDF only for now; the slide decks are unchanged.
+- **Composite-overlap note.** When a flagged composite is explained by another
+  flag, the report says so rather than leaving it to read as a second problem
+  — "Morbidity: 13 events, all also counted under SSI — one chart review, not
+  two." The note is conditional on the overlap actually existing and is
+  measured only against complications that themselves flagged.
+
+See **Triage** under Methodology for the rules that keep the procedure table
+honest at these volumes.
+
+The Case Details download no longer has to be renamed. `data_file` is treated
+as a prefix, so the file NSQIP produces —
+`Case_Details_Report-17-Aug-2026-1503.xlsx` — can be dropped into `data/` as
+is, and the newest matching download is used. Old downloads can stay in the
+folder; the newest by filename date is used, and whatever follows the date is
+ignored. An undated leftover ranks below every dated file so it cannot
+silently win, and Excel `~$` lock files are skipped.
+
+Also in this release: the slide decks no longer carry O/E trend charts. That
+history is already in the PDF report and in the SAR/ISAR reports NSQIP shares
+with the divisions, so the deck slides were duplication. The PDF is unchanged.
+
+Two long-standing cosmetic bugs are fixed alongside it. Deck CUSUM frames were
+titled with column names — "unplanned\_reop", "cdiff" — because
+`generate_specialty_charts()` keys its list on the column and the deck used
+that key as the heading; the labels existed all along in a private duplicate
+of `complication_labels` inside `cusum_functions.R`, which is now collapsed
+into the one definition. And the version string in the report footer and the
+deck's closing frame was hard-coded separately in each, and had read v1.4
+since before the v1.5.0 release; both now read `R/version.R`, which a test
+enforces.
 
 ### v1.5.0 — August 2026
 

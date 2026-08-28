@@ -156,3 +156,22 @@ test_that("targeted rates are used only in site_expected mode", {
   expect_false(is.null(targeted_for_mode(bundle, "site_expected")))
   expect_null(targeted_for_mode(bundle, "national_observed"))
 })
+
+
+# ---- Version ----------------------------------------------------------------
+
+test_that("the version label is defined in exactly one place", {
+  expect_match(NSQIP_CUSUM_VERSION, "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  expect_equal(nsqip_version_label(),
+               paste0("NSQIP CUSUM Monitoring System v", NSQIP_CUSUM_VERSION))
+
+  # No output may carry its own hard-coded literal: the report footer and the
+  # deck's closing frame each had one, and both sat at v1.4 through v1.5.0.
+  sources <- c(file.path(.proj_root, "nsqip_cusum_report.qmd"),
+               file.path(.proj_root, "R", "render_beamer_slides.R"))
+  for (f in sources) {
+    txt <- paste(readLines(f, warn = FALSE), collapse = "\n")
+    expect_false(grepl("Monitoring System v[0-9]", txt),
+                 info = paste("hard-coded version string in", basename(f)))
+  }
+})

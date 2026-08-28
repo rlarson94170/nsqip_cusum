@@ -408,6 +408,20 @@ plot_oe_trend <- function(ot_data, complication_name) {
 #' @param odds_ratio Odds ratio for p1 (default 2)
 #' @param div Optional division name (NULL for all cases in specialty)
 #' @return A named list of ggplot objects
+#' Display title for a chart returned by generate_specialty_charts()
+#'
+#' The returned list is keyed on the column name, which is what callers index
+#' by; anything rendering a heading needs the label instead.
+#'
+#' @param var_name Name from `names(charts)`
+#' @return The display label, or `var_name` unchanged if it is not a monitored
+#'   complication
+chart_frame_title <- function(var_name) {
+  lbl <- unname(complication_labels[var_name])
+  ifelse(is.na(lbl), var_name, lbl)
+}
+
+
 generate_specialty_charts <- function(data, spec, rates, odds_ratio = 2.0,
                                       div = NULL, targeted_rates = NULL,
                                       target_arl = 500) {
@@ -428,21 +442,14 @@ generate_specialty_charts <- function(data, spec, rates, odds_ratio = 2.0,
     return(list())
   }
   
-  comp_var_to_label <- c(
-    mortality = "Mortality", morbidity = "Morbidity",
-    cardiac = "Cardiac", pneumonia = "Pneumonia",
-    unplanned_intubation = "Unplanned Intubation",
-    vent48 = "Ventilator > 48h", vte = "VTE",
-    renal_failure = "Renal Failure", uti = "UTI",
-    ssi = "SSI", sepsis = "Sepsis", cdiff = "C.diff Colitis",
-    unplanned_reop = "Unplanned Reoperation",
-    unplanned_readmit = "Unplanned Readmission"
-  )
-  
+  # complication_labels (R/data_processing.R) is the single source. This used
+  # to be a private duplicate of it, which is how the slide decks ended up
+  # titling frames "unplanned_reop": the labels existed but were not reachable
+  # from the returned list, and two copies could drift apart unnoticed.
   charts <- list()
-  
-  for (var_name in names(comp_var_to_label)) {
-    comp_label <- comp_var_to_label[var_name]
+
+  for (var_name in names(complication_labels)) {
+    comp_label <- unname(complication_labels[var_name])
     
     rate_info <- rates |> filter(specialty == spec, complication == comp_label)
     if (nrow(rate_info) == 0 || is.na(rate_info$p0)) next

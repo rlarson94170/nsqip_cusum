@@ -42,6 +42,10 @@ load_report_data <- function(data_file,
                                              "Thoracic", "Plastics"),
                              cache_dir = REPORT_CACHE_DIR) {
 
+  # render_reports.R resolves once for the whole run, so this is normally a
+  # no-op; it matters for anything calling in directly with a prefix.
+  data_file <- resolve_case_file(data_file, quiet = TRUE)
+
   key <- .report_cache_key(data_file, site_sar_file, surgeon_mapping_file,
                            benchmark_type, specialties)
 

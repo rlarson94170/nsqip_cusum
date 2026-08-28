@@ -19,6 +19,7 @@ library(tinytex)
 # Helpers, in dependency order. These are sourced explicitly rather than
 # relied on as a side effect of calling the slide renderer — division
 # discovery needs them even when render_slides is FALSE.
+source("R/version.R")
 source("R/benchmarks.R")
 source("R/data_processing.R")
 source("R/cusum_functions.R")
@@ -35,7 +36,11 @@ preflight_latex(strict = TRUE)
 
 # ---- CONFIGURATION ----------------------------------------------------------
 
-# Path to the latest Case Details Report download
+# Where to find the Case Details Report download. This is a prefix, not an
+# exact filename: NSQIP appends the download date and site ID, and the newest
+# matching "Case_Details_Report*.xlsx" in the folder is used. Drop the file in
+# data/ under whatever name it arrived with — no renaming needed. Name a
+# specific download here to pin the run to it.
 data_file <- "data/Case_Details_Report.xlsx"
 
 # Path to Site SAR/ISAR Summary (set to NULL if not available)
@@ -82,11 +87,10 @@ output_dir <- "output"
 
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
 
-# Validate files
-if (!file.exists(data_file)) {
-  stop("Case Details file not found: ", data_file,
-       "\nPlace your Case Details Report .xlsx in the data/ folder.")
-}
+# Validate files. Resolving here rather than inside each render pins the whole
+# run to one download: a folder that changes mid-run cannot leave some reports
+# built from one file and some from another.
+data_file <- resolve_case_file(data_file)
 
 if (!is.null(site_sar_file) && !file.exists(site_sar_file)) {
   message("NOTE: Site SAR file not found: ", site_sar_file)
@@ -104,7 +108,10 @@ if (!has_mapping && length(division_specialties) > 0) {
 message("\n", strrep("=", 65))
 message("  NSQIP CUSUM Report Generation")
 message(strrep("=", 65))
-message("Data file:      ", data_file)
+dl_date <- case_file_date(data_file)
+message("Data file:      ", basename(data_file),
+        if (!is.na(dl_date)) paste0("  (downloaded ",
+                                    format(dl_date, "%d %b %Y"), ")") else "")
 message("Site SAR:       ", ifelse(is.null(site_sar_file), "(not provided)", site_sar_file))
 message("Surgeon map:    ", ifelse(has_mapping, surgeon_mapping_file, "(not provided)"))
 message("Benchmark type: ", benchmark_type)

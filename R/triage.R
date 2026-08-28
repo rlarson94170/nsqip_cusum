@@ -27,6 +27,7 @@
 
 library(dplyr)
 library(tibble)
+library(stringr)
 
 # Gate defaults. MIN_EVENTS is the floor below which no ratio is believable:
 # two events against one expected is a 2x "excess" and pure noise.
@@ -156,6 +157,235 @@ build_triage <- function(data, spec, div = NULL, benchmark_rates,
 
   bind_rows(rows) |>
     arrange(ifelse(tier == 0, 99L, tier), p_value)
+}
+
+
+# ---- Per-flag procedure breakdown -------------------------------------------
+#
+# A flag names a complication, not a place to look. Thirteen SSIs spread evenly
+# across a service and thirteen concentrated in two procedures call for
+# completely different chart reviews, and the flag alone cannot tell them apart.
+#
+# Cases are grouped on the raw CPT rather than `procedure_category`, because
+# PROCEDURE_CPT_MAP covers General Surgery only — every Plastics case falls
+# through to "Other", which is exactly where this breakdown is most needed.
+#
+# The rollup row is the comparison: "these two procedures ran 28% and 33%
+# against 4.3% for everything else" is the finding, and a rate with nothing to
+# sit against is not interpretable. That makes the rollup load-bearing, and it
+# is only meaningful if single-event CPTs stay inside it — one event is a case,
+# not a concentration, and listing it separately both adds a 1-of-1 row at 100%
+# and drains the baseline it should be measured against. In the 2026-H1
+# Plastics data, listing the three singletons moved the rest-of-service rate
+# from 4.3% to 0.0% and made the two real outliers look starker than they are.
+
+FLAG_PROCEDURE_TOP_N   <- 5L
+FLAG_PROCEDURE_MIN_EV  <- 2L
+FLAG_PROCEDURE_DESC_CH <- 38L
+
+# Label for the rollup row; also used by the report to style it differently
+FLAG_PROCEDURE_OTHER <- "All other CPTs"
+
+
+#' Most frequent non-missing description for a CPT
+#'
+#' A code should carry one description, but free-text edits across a download
+#' produce near-duplicates, so take the commonest rather than the first.
+.modal_desc <- function(x) {
+  x <- x[!is.na(x) & nzchar(x)]
+  if (length(x) == 0) return(NA_character_)
+  names(sort(table(x), decreasing = TRUE))[1]
+}
+
+
+#' Top CPTs by event count for each flagged complication
+#'
+#' Ranked by event count, not rate: ranking by rate puts every 1-of-1 procedure
+#' at the top of the table and buries the concentration worth reviewing.
+#' Denominators are always shown rather than filtered on — the concentrations
+#' that motivated this sat at n = 15 and n = 18, so any floor high enough to
+#' make a rate "reliable" would discard the finding.
+#'
+#' @param data Processed case data with cpt_code and cpt_desc
+#' @param spec Specialty name
+#' @param div Division name, or NULL/"" for the whole specialty
+#' @param triage Output of build_triage()
+#' @param top_n CPTs listed per complication before the rollup row
+#' @param min_cpt_events Events a CPT needs before it is listed separately
+#'   rather than folded into the rollup
+#' @param max_desc Description truncation width
+#' @return A tibble with one row per (complication, CPT) plus a rollup row per
+#'   complication, or NULL if nothing flagged, no complication has a CPT
+#'   carrying repeat events, or CPTs are unavailable
+build_flag_procedures <- function(data, spec, div = NULL, triage,
+                                  top_n = FLAG_PROCEDURE_TOP_N,
+                                  min_cpt_events = FLAG_PROCEDURE_MIN_EV,
+                                  max_desc = FLAG_PROCEDURE_DESC_CH) {
+
+  if (is.null(triage) || nrow(triage) == 0) return(NULL)
+  flagged <- triage |> filter(tier > 0)
+  if (nrow(flagged) == 0) return(NULL)
+
+  # Older cached case data predates the CPT columns; degrade to no table
+  # rather than failing the render.
+  if (!all(c("cpt_code", "cpt_desc") %in% names(data))) return(NULL)
+
+  df <- data |> filter(specialty == spec)
+  if (!is.null(div) && nchar(div) > 0) df <- df |> filter(division == div)
+  if (nrow(df) == 0) return(NULL)
+
+  df$.cpt <- ifelse(is.na(df$cpt_code), "(missing)", as.character(df$cpt_code))
+
+  rows <- list()
+
+  for (i in seq_len(nrow(flagged))) {
+    v <- flagged$var[i]
+    if (!(v %in% names(df))) next
+
+    by_cpt <- df |>
+      summarise(
+        events      = sum(.data[[v]], na.rm = TRUE),
+        cases       = dplyr::n(),
+        description = .modal_desc(cpt_desc),
+        .by         = .cpt
+      ) |>
+      mutate(rate_pct = round(events / cases * 100, 1))
+
+    top <- by_cpt |>
+      filter(events >= min_cpt_events) |>
+      arrange(desc(events), desc(rate_pct)) |>
+      head(top_n)
+
+    # Every event a one-off: there is no concentration to point a reviewer at,
+    # and a table of rollup-only would imply otherwise.
+    if (nrow(top) == 0) next
+
+    rest <- by_cpt |> filter(!(.cpt %in% top$.cpt))
+
+    out <- top |>
+      transmute(
+        cpt         = .cpt,
+        description = str_trunc(coalesce(description, ""), max_desc),
+        events      = as.integer(events),
+        cases       = as.integer(cases),
+        rate_pct    = rate_pct,
+        is_other    = FALSE
+      )
+
+    # Only when there is something left to compare against: with every case
+    # already listed, a 0-of-0 rollup row is noise.
+    if (nrow(rest) > 0 && sum(rest$cases) > 0) {
+      out <- bind_rows(out, tibble(
+        cpt         = paste0("(", nrow(rest), ngettext(nrow(rest),
+                                                       " CPT)", " CPTs)")),
+        description = FLAG_PROCEDURE_OTHER,
+        events      = as.integer(sum(rest$events)),
+        cases       = as.integer(sum(rest$cases)),
+        rate_pct    = round(sum(rest$events) / sum(rest$cases) * 100, 1),
+        is_other    = TRUE
+      ))
+    }
+
+    rows[[length(rows) + 1]] <- out |>
+      mutate(complication = flagged$complication[i], var = v, .before = 1)
+  }
+
+  if (length(rows) == 0) return(NULL)
+  bind_rows(rows)
+}
+
+
+# ---- Composite overlap ------------------------------------------------------
+#
+# Morbidity is an OR over the individual complications, so when SSI is elevated
+# morbidity is elevated too and the worklist shows two flags for one problem.
+# Whether that is true has to be checked rather than assumed: in the 2026-H1
+# data Plastics morbidity was entirely SSI, while General Surgery was about
+# half, with a substantial block of morbidity events no other flag accounted
+# for. The first is one chart review, the second is two.
+#
+# Overlap is measured only against complications that themselves flagged. The
+# question is whether one flag on the worklist subsumes another, not whether
+# the composite is definitionally a union — it always is.
+
+# Monitored complications that feed the morbidity composite, per its derivation
+# in derive_case_indicators(). Wound disruption and stroke also feed it but are
+# not separately monitored, so they can only ever appear as unexplained events.
+COMPOSITE_COMPONENTS <- list(
+  morbidity = c("ssi", "pneumonia", "unplanned_intubation", "vent48",
+                "renal_failure", "uti", "cardiac", "sepsis")
+)
+
+
+.and_list <- function(x) {
+  if (length(x) == 0) return("")
+  if (length(x) == 1) return(x[1])
+  if (length(x) == 2) return(paste(x, collapse = " or "))
+  paste0(paste(x[-length(x)], collapse = ", "), ", or ", x[length(x)])
+}
+
+
+#' Note where a flagged composite is explained by another flag
+#'
+#' @param triage Output of build_triage()
+#' @param data Processed case data
+#' @param spec Specialty name
+#' @param div Division name, or NULL/"" for the whole specialty
+#' @return `triage` with `overlap_note` and `overlap_full` columns added
+#'   (NA/FALSE where the complication is not a composite, or where no component
+#'   complication flagged). `overlap_full` marks the case where the composite
+#'   adds no patients at all, so the report can suppress its duplicate detail.
+annotate_composite_overlap <- function(triage, data, spec, div = NULL) {
+
+  if (is.null(triage) || nrow(triage) == 0) return(triage)
+
+  triage$overlap_note <- NA_character_
+  triage$overlap_full <- FALSE
+
+  df <- data |> filter(specialty == spec)
+  if (!is.null(div) && nchar(div) > 0) df <- df |> filter(division == div)
+  if (nrow(df) == 0) return(triage)
+
+  flagged_vars <- triage$var[triage$tier > 0]
+
+  for (i in seq_len(nrow(triage))) {
+    v <- triage$var[i]
+    if (triage$tier[i] == 0) next
+    if (!(v %in% names(COMPOSITE_COMPONENTS))) next
+    if (!(v %in% names(df))) next
+
+    components <- intersect(COMPOSITE_COMPONENTS[[v]], flagged_vars)
+    components <- intersect(components, names(df))
+    if (length(components) == 0) next
+
+    has_comp <- df[[v]] == 1L & !is.na(df[[v]])
+    n_total  <- sum(has_comp)
+    if (n_total == 0) next
+
+    covered <- rep(FALSE, nrow(df))
+    for (cv in components) covered <- covered | (df[[cv]] == 1L & !is.na(df[[cv]]))
+
+    n_overlap <- sum(has_comp & covered)
+    n_only    <- n_total - n_overlap
+    if (n_overlap == 0) next
+
+    labels <- .and_list(unname(complication_labels[components]))
+
+    triage$overlap_full[i] <- n_only == 0
+
+    triage$overlap_note[i] <- if (n_only == 0) {
+      paste0(n_total, " events, all also counted under ", labels,
+             " — one chart review, not two.")
+    } else {
+      paste0(n_overlap, " of ", n_total, " events (",
+             round(n_overlap / n_total * 100), "%) also counted under ",
+             labels, "; ", n_only,
+             ngettext(n_only, " event is", " events are"),
+             " not explained by another flag.")
+    }
+  }
+
+  triage
 }
 
 

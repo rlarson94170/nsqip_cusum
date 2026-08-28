@@ -9,6 +9,7 @@
 .proj_root <- normalizePath(file.path("..", ".."), mustWork = TRUE)
 
 suppressMessages({
+  source(file.path(.proj_root, "R", "version.R"))
   source(file.path(.proj_root, "R", "benchmarks.R"))
   source(file.path(.proj_root, "R", "data_processing.R"))
   source(file.path(.proj_root, "R", "cusum_functions.R"))
@@ -56,19 +57,27 @@ fake_targeted <- function(spec = "General Surgery") {
 #' @param n_by_cat Named vector: procedure_category -> number of cases
 #' @param events Named list: complication column -> integer vector of 0/1,
 #'   recycled to the total case count
+#' @param cpt CPT code per case, recycled to the total case count. Defaults to
+#'   one code for every case, which is enough for anything not testing the
+#'   per-flag procedure breakdown.
 fake_cases <- function(n_by_cat = c(Colectomy = 6, Other = 4),
                        events = list(),
                        spec = "General Surgery",
-                       div = "Colorectal") {
+                       div = "Colorectal",
+                       cpt = 44950) {
   cats <- rep(names(n_by_cat), times = unname(n_by_cat))
   n <- length(cats)
+
+  codes <- rep_len(as.character(cpt), n)
 
   base <- tibble::tibble(
     case_id            = seq_len(n),
     op_date            = as.Date("2026-01-01") + seq_len(n),
     specialty          = spec,
     division           = div,
-    procedure_category = cats
+    procedure_category = cats,
+    cpt_code           = codes,
+    cpt_desc           = paste0("Procedure ", codes)
   )
 
   for (v in names(complication_labels)) base[[v]] <- 0L

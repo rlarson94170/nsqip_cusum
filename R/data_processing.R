@@ -63,6 +63,122 @@ PATOS_PAIRS <- c(
 )
 
 
+# ---- Locating the Case Details download -------------------------------------
+#
+# NSQIP appends the download date and a further four digits to the filename,
+# so a download arrives as "Case_Details_Report-28-Aug-2026-1201.xlsx". The
+# file is kept under that name rather than renamed: the date records when the
+# data was pulled, and renaming to a fixed filename throws it away and has to
+# be redone every quarter. So the configured path is treated as a prefix —
+# anything matching "Case_Details_Report*.xlsx" is ingested, whatever the
+# suffix turns out to be.
+
+CASE_FILE_PREFIX <- "Case_Details_Report"
+
+# Locale-independent month lookup. as.Date(format = "%b") reads %b through
+# LC_TIME, so it silently returns NA under a non-English locale — the dates in
+# these filenames are always English abbreviations regardless of the machine.
+.MONTH_ABB <- setNames(1:12, c("jan", "feb", "mar", "apr", "may", "jun",
+                               "jul", "aug", "sep", "oct", "nov", "dec"))
+
+
+#' Download date encoded in a Case Details filename
+#'
+#' Only the date is read. NSQIP also appends four more digits, but nothing
+#' depends on what they are — the expected case is a single download in
+#' `data/`, and a lone file is used whatever it is called.
+#'
+#' @param path One or more file paths
+#' @return A Date vector, NA where the filename carries no parseable date
+case_file_date <- function(path) {
+  base <- basename(path)
+  pat  <- "[0-9]{1,2}-[A-Za-z]{3}-[0-9]{4}"
+
+  out   <- rep(NA_real_, length(path))
+  found <- regexpr(pat, base) > 0
+  if (!any(found)) return(as.Date(out, origin = "1970-01-01"))
+
+  parts <- strsplit(regmatches(base, regexpr(pat, base)), "-", fixed = TRUE)
+  vals <- vapply(parts, function(p) {
+    mo <- .MONTH_ABB[tolower(p[2])]
+    if (is.na(mo)) return(NA_real_)
+    d <- suppressWarnings(as.Date(sprintf("%s-%02d-%02d", p[3], mo,
+                                          as.integer(p[1]))))
+    if (is.na(d)) NA_real_ else as.numeric(d)
+  }, numeric(1))
+
+  out[found] <- vals
+  as.Date(out, origin = "1970-01-01")
+}
+
+
+#' Resolve the configured path to an actual Case Details download
+#'
+#' The configured path is a prefix, not an exact name: `data/` or
+#' `data/Case_Details_Report.xlsx` both select the newest
+#' `Case_Details_Report*.xlsx` sitting beside it. Naming a specific download
+#' still works, because a full filename is a prefix that matches only itself.
+#'
+#' One download in `data/` at a time is the expected case, and a lone file is
+#' returned whatever it is named — nothing in the suffix has to parse. The
+#' ranking below only decides between files when more than one is present.
+#'
+#' Ranking is by the date in the filename, newest first, with modification
+#' time breaking ties. A file with no date ranks below every dated one — a
+#' bare `Case_Details_Report.xlsx` left over from an earlier run must not
+#' outrank a fresh download, since silently using stale data is the failure
+#' this is meant to prevent.
+#'
+#' @param path Directory, prefix, or exact file path
+#' @param quiet Suppress the message naming the file chosen
+#' @return The resolved path to a single .xlsx file
+resolve_case_file <- function(path, quiet = FALSE) {
+
+  if (is.null(path) || length(path) != 1 || is.na(path) || !nzchar(path)) {
+    stop("No Case Details path configured.")
+  }
+
+  if (dir.exists(path)) {
+    dir <- path
+    stem <- CASE_FILE_PREFIX
+  } else {
+    dir  <- dirname(path)
+    stem <- sub("\\.xlsx$", "", basename(path), ignore.case = TRUE)
+  }
+
+  if (!dir.exists(dir)) {
+    stop("Case Details folder not found: ", dir)
+  }
+
+  hits <- list.files(dir, pattern = paste0("^", stem, ".*\\.xlsx$"),
+                     ignore.case = TRUE, full.names = TRUE)
+
+  # Excel writes a "~$name.xlsx" lock file while the workbook is open. It
+  # matches any sensible glob and is not a readable workbook.
+  hits <- hits[!startsWith(basename(hits), "~$")]
+
+  if (length(hits) == 0) {
+    stop("No Case Details file found in ", dir, "/ matching \"", stem,
+         "*.xlsx\".\n",
+         "Place the download from NSQIP in that folder; the name it arrives ",
+         "with is fine.")
+  }
+
+  dates  <- case_file_date(hits)
+  mtimes <- file.info(hits)$mtime
+  # na.last keeps undated files below dated ones even under decreasing order;
+  # mtime is the second key, so same-date files resolve to the newer one.
+  chosen <- hits[order(dates, mtimes, decreasing = TRUE, na.last = TRUE)][1]
+
+  if (!quiet && length(hits) > 1) {
+    message("  ", length(hits), " Case Details files present; using the ",
+            "newest: ", basename(chosen))
+  }
+
+  chosen
+}
+
+
 #' Read the raw Case Details Report
 #'
 #' Kept separate from the derivation so the derivation can be exercised

@@ -26,6 +26,7 @@ format:
 params:
   specialty: "General Surgery"
   division: ""
+  # A prefix, not an exact name — see resolve_case_file() in R/data_processing.R
   data_file: "data/Case_Details_Report.xlsx"
   site_sar_file: "data/SAR_Site_Summary.xlsx"
   surgeon_mapping_file: "data/surgeon_division_mapping.csv"
@@ -42,6 +43,7 @@ execute:
 ```{r setup}
 #| include: false
 
+source("R/version.R")
 source("R/benchmarks.R")
 source("R/data_processing.R")
 source("R/cusum_functions.R")
@@ -148,6 +150,7 @@ triage <- build_triage(
   target_arl      = params$target_arl
 )
 triage <- annotate_carryover(triage, spec, div)
+triage <- annotate_composite_overlap(triage, case_data, spec, div)
 
 cat("A complication is listed for review only when the cumulative rate is",
     "elevated (at least", TRIAGE_MIN_EVENTS, "events and one-sided p <",
@@ -175,6 +178,58 @@ if (is.null(flagged) || nrow(flagged) == 0) {
               caption = "Complications meeting the review threshold") |>
         kable_styling(latex_options = c("hold_position"), font_size = 9))
   cat("\n\n")
+
+  # Composite overlap: say when two flags are one problem, so a division does
+  # not open two chart reviews on the same patients.
+  notes <- flagged |> filter(!is.na(overlap_note))
+  if (nrow(notes) > 0) {
+    for (i in seq_len(nrow(notes))) {
+      cat("**", notes$complication[i], ":** ", notes$overlap_note[i],
+          "\n\n", sep = "")
+    }
+  }
+}
+
+# Where the events sit. A flag names a complication; this names the procedures
+# to pull charts on.
+proc_break <- build_flag_procedures(case_data, spec, div, triage)
+
+if (!is.null(proc_break) && nrow(proc_break) > 0) {
+
+  # A composite that adds no patients would repeat the explaining flag's table
+  # verbatim, which reads as a second finding.
+  redundant <- if ("overlap_full" %in% names(triage)) {
+    triage$complication[which(triage$overlap_full)]
+  } else character(0)
+  proc_break <- proc_break |> filter(!(complication %in% redundant))
+}
+
+if (!is.null(proc_break) && nrow(proc_break) > 0) {
+  cat("## Where the events sit\n\n")
+  cat("For each flagged complication, the CPTs carrying the most events.",
+      "Rows are ordered by event count, not rate, and denominators are shown",
+      "as they are: at these volumes a high rate on a handful of cases is",
+      "common and usually means nothing. The rollup row is the comparison —",
+      "a procedure only stands out relative to the rest of the service.\n\n")
+
+  for (comp in unique(proc_break$complication)) {
+    sub <- proc_break |> filter(complication == comp)
+    ptbl <- sub |>
+      transmute(
+        CPT           = cpt,
+        Procedure     = description,
+        Events        = events,
+        Cases         = cases,
+        `Rate %`      = rate_pct
+      )
+    k <- kable(ptbl, format = "latex", booktabs = TRUE, linesep = "",
+               caption = paste0(comp, " — events by procedure")) |>
+      kable_styling(latex_options = c("hold_position"), font_size = 8)
+    other_row <- which(sub$is_other)
+    if (length(other_row) > 0) k <- k |> row_spec(other_row, italic = TRUE)
+    print(k)
+    cat("\n\n")
+  }
 }
 
 # Sensitivity floor, so "nothing flagged" is interpretable
@@ -661,6 +716,6 @@ if (!is.null(comp_caselist) && nrow(comp_caselist) > 0) {
 
 ---
 
-*Report generated `r format(Sys.time(), "%Y-%m-%d %H:%M")` | NSQIP CUSUM Monitoring System v1.4*
+*Report generated `r format(Sys.time(), "%Y-%m-%d %H:%M")` | `r nsqip_version_label()`*
 \
 *Benchmark: `r bench_desc``r if (!is.null(div)) paste0(" | Division: ", div)`*

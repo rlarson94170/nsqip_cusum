@@ -135,3 +135,26 @@ test_that("rejects p0 outside the open unit interval", {
   expect_error(calibrate_h(1, target_arl = 500), "between 0 and 1")
   expect_error(calibrate_h(NA_real_, target_arl = 500), "no usable p0")
 })
+
+
+# ---- Chart display titles ---------------------------------------------------
+#
+# generate_specialty_charts() keys its list on the column name, so any caller
+# rendering a heading has to translate. The slide decks did not, and titled
+# frames "unplanned_reop" for three releases.
+
+test_that("chart titles resolve to display labels", {
+  expect_equal(chart_frame_title("unplanned_reop"), "Unplanned Reoperation")
+  expect_equal(chart_frame_title("cdiff"), "C.diff Colitis")
+  expect_equal(chart_frame_title("vent48"), "Ventilator > 48h")
+})
+
+test_that("an unrecognised name passes through rather than becoming NA", {
+  expect_equal(chart_frame_title("not_a_complication"), "not_a_complication")
+})
+
+test_that("every monitored complication has a title", {
+  titles <- chart_frame_title(names(complication_labels))
+  expect_false(any(is.na(titles)))
+  expect_false(any(titles == names(complication_labels)))
+})
