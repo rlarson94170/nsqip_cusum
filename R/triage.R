@@ -389,6 +389,98 @@ annotate_composite_overlap <- function(triage, data, spec, div = NULL) {
 }
 
 
+# ---- Case list for the flagged complications ---------------------------------
+#
+# The full report's appendix lists every complication in the trailing three
+# months, which is the right thing there and the wrong thing in a two-page
+# handout. Two differences:
+#
+#   - Only the complications that flagged. A summary that reproduced every
+#     occurrence would just be the appendix again.
+#   - The whole report window, not the trailing three months, because the flag
+#     was computed over the whole window. "13 SSIs" over a seven-row table is
+#     a discrepancy the reader has to resolve, and they should not have to.
+#
+# Cases are matched on the triage row's own `var`, the same column build_triage()
+# counted, so the row count reconciles with the Obs column by construction.
+
+# `overlap_full` is logical but arrives NA for non-composites, and filter()
+# drops NA rows. Wanted here is "not TRUE", NA included.
+isTRUE_vec <- function(x) !is.na(x) & x
+
+
+#' Case list restricted to the complications that flagged
+#'
+#' @param data Processed case data
+#' @param spec Specialty name
+#' @param div Division name, or NULL/"" for the whole specialty
+#' @param triage Output of build_triage(), ideally after
+#'   annotate_composite_overlap()
+#' @param tiers Which tiers to include; default all flagged
+#' @param drop_redundant Drop composites that add no patients over the flag
+#'   explaining them, matching how the procedure breakdown is suppressed. Their
+#'   cases are already listed under the explaining complication.
+#' @return A tibble ready for display, or NULL if nothing flagged or no case
+#'   carries a flagged complication
+build_flag_caselist <- function(data, spec, div = NULL, triage,
+                                tiers = 1:3, drop_redundant = TRUE) {
+
+  if (is.null(triage) || nrow(triage) == 0) return(NULL)
+
+  flagged <- triage |> filter(.data$tier %in% tiers)
+
+  if (drop_redundant && "overlap_full" %in% names(triage)) {
+    flagged <- flagged |> filter(!isTRUE_vec(.data$overlap_full))
+  }
+  if (nrow(flagged) == 0) return(NULL)
+
+  df <- data |> filter(.data$specialty == spec)
+  if (!is.null(div) && nchar(div) > 0) df <- df |> filter(.data$division == div)
+  if (nrow(df) == 0) return(NULL)
+
+  vars <- flagged$var[flagged$var %in% names(df)]
+  if (length(vars) == 0) return(NULL)
+
+  labels <- setNames(flagged$complication, flagged$var)[vars]
+
+  # One occurrence string per case, naming only the flagged complications it
+  # carries. Built column-wise rather than by apply()-ing over the data frame,
+  # which coerces every column to character on the way in.
+  hits <- lapply(vars, function(v) {
+    on <- !is.na(df[[v]]) & df[[v]] == 1
+    lbl <- unname(labels[v])
+    if (v == "unplanned_readmit") {
+      rel   <- !is.na(df$readmit_related)   & df$readmit_related   == 1
+      unrel <- !is.na(df$readmit_unrelated) & df$readmit_unrelated == 1
+      lbl <- ifelse(rel & unrel, "Readmission (related + unrelated)",
+             ifelse(rel,         "Readmission (related)",
+             ifelse(unrel,       "Readmission (unrelated)", lbl)))
+    }
+    ifelse(on, lbl, NA_character_)
+  })
+
+  occ <- apply(do.call(cbind, hits), 1, function(r) {
+    r <- r[!is.na(r)]
+    if (length(r) == 0) "" else paste(r, collapse = ", ")
+  })
+
+  df$.occ <- occ
+  df <- df |> filter(nchar(.data$.occ) > 0)
+  if (nrow(df) == 0) return(NULL)
+
+  df |>
+    arrange(.data$op_date) |>
+    transmute(
+      MRN         = .data$lmrn,
+      `Op Date`   = format(.data$op_date, "%m/%d/%y"),
+      Surgeon     = sapply(.data$surgeon, format_surgeon_name),
+      CPT         = .data$cpt_code,
+      ASA         = sapply(.data$asa_class, format_asa_class),
+      LOS         = as.integer(.data$los),
+      Occurrences = .data$.occ
+    )
+}
+
 # ---- Carry-over tracking ----------------------------------------------------
 
 TRIAGE_HISTORY_FILE <- "output/triage_history.csv"

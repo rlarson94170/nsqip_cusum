@@ -9,7 +9,7 @@
 # Bump this alongside the Version History section in README.md.
 # =============================================================================
 
-NSQIP_CUSUM_VERSION <- "1.5.1"
+NSQIP_CUSUM_VERSION <- "1.5.2"
 
 #' Version string as it appears in report and deck footers
 nsqip_version_label <- function() {

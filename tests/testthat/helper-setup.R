@@ -77,7 +77,15 @@ fake_cases <- function(n_by_cat = c(Colectomy = 6, Other = 4),
     division           = div,
     procedure_category = cats,
     cpt_code           = codes,
-    cpt_desc           = paste0("Procedure ", codes)
+    cpt_desc           = paste0("Procedure ", codes),
+    # Case-detail columns, needed by anything that renders a case list.
+    # Benign defaults; override via the returned frame where a test cares.
+    lmrn               = sprintf("%08d", seq_len(n)),
+    surgeon            = "SURGEON,A (1)",
+    asa_class          = "ASA II - Mild Disturb",
+    los                = 2L,
+    readmit_related    = 0L,
+    readmit_unrelated  = 0L
   )
 
   for (v in names(complication_labels)) base[[v]] <- 0L

@@ -25,6 +25,7 @@ source("R/data_processing.R")
 source("R/cusum_functions.R")
 source("R/triage.R")
 source("R/load_report_data.R")
+source("R/output_names.R")
 
 # The direct beamer slide renderer (bypasses Quarto/pandoc)
 source("R/render_beamer_slides.R")
@@ -80,6 +81,11 @@ target_arl <- 1500
 # Output formats: set render_slides = TRUE to also produce beamer slide decks
 render_slides <- TRUE
 
+# Also produce the 1-2 page executive summary handout for each scope. This is
+# a distillation of the full report, not a separate analysis: every number in
+# it comes from the same triage calls against the same cached input bundle.
+render_summary <- TRUE
+
 # Output directory
 output_dir <- "output"
 
@@ -121,6 +127,7 @@ message("Parameters:     OR = ", odds_ratio, ", Target ARL = ", target_arl)
 message("Triage gates:   >= ", TRIAGE_MIN_EVENTS, " events and p < ",
         TRIAGE_ALPHA, ", plus CUSUM timing")
 message("Slide decks:    ", ifelse(render_slides, "Yes", "No"))
+message("Exec summaries: ", ifelse(render_summary, "Yes", "No"))
 message("Output:         ", output_dir, "/")
 message(strrep("=", 65), "\n")
 
@@ -148,20 +155,9 @@ message(strrep("=", 65), "\n")
 
 # Helper to render a single PDF report via Quarto
 render_one <- function(spec, div = "", label = NULL) {
-  if (is.null(label)) {
-    label <- if (nchar(div) > 0) paste0(spec, " — ", div) else spec
-  }
-  
-  spec_clean <- gsub("[/ ]", "_", tolower(spec))
-  div_clean  <- gsub("[/ ]", "_", tolower(div))
-  
-  base_name <- if (nchar(div) > 0) {
-    paste0("NSQIP_CUSUM_", spec_clean, "_", div_clean, "_", format(Sys.Date(), "%Y%m%d"))
-  } else {
-    paste0("NSQIP_CUSUM_", spec_clean, "_", format(Sys.Date(), "%Y%m%d"))
-  }
-  
-  filename <- paste0(base_name, ".pdf")
+  if (is.null(label)) label <- scope_label(spec, div)
+
+  filename <- paste0(scope_base_name(spec, div), ".pdf")
   output_file <- file.path(output_dir, filename)
   
   message("\n--- Rendering: ", label, " ---")
@@ -207,18 +203,9 @@ render_one <- function(spec, div = "", label = NULL) {
 
 # Helper to render a slide deck (direct R → LaTeX → PDF, no Quarto)
 render_slides_one <- function(spec, div = "") {
-  label <- if (nchar(div) > 0) paste0(spec, " \u2014 ", div) else spec
-  
-  spec_clean <- gsub("[/ ]", "_", tolower(spec))
-  div_clean  <- gsub("[/ ]", "_", tolower(div))
-  
-  base_name <- if (nchar(div) > 0) {
-    paste0("NSQIP_CUSUM_", spec_clean, "_", div_clean, "_", format(Sys.Date(), "%Y%m%d"))
-  } else {
-    paste0("NSQIP_CUSUM_", spec_clean, "_", format(Sys.Date(), "%Y%m%d"))
-  }
-  
-  filename <- paste0(base_name, "_slides.pdf")
+  label <- scope_label(spec, div)
+
+  filename <- paste0(scope_base_name(spec, div), "_slides.pdf")
   out_file <- file.path(output_dir, filename)
   
   message("\n--- Rendering: ", label, " [slides] ---")
@@ -249,6 +236,52 @@ render_slides_one <- function(spec, div = "") {
   .record_render(label, "slides", ok)
   invisible(ok)
 }
+
+# Helper to render the executive summary handout (Quarto, separate template)
+render_summary_one <- function(spec, div = "") {
+  label <- scope_label(spec, div)
+
+  out_file <- file.path(output_dir,
+                        paste0(scope_base_name(spec, div), "_summary.pdf"))
+
+  message("\n--- Rendering: ", label, " [summary] ---")
+
+  ok <- tryCatch({
+    quarto_render(
+      input = "nsqip_cusum_summary.qmd",
+      execute_params = list(
+        specialty            = spec,
+        division             = div,
+        data_file            = data_file,
+        site_sar_file        = ifelse(is.null(site_sar_file), "", site_sar_file),
+        surgeon_mapping_file = ifelse(has_mapping, surgeon_mapping_file, ""),
+        benchmark_type       = benchmark_type,
+        specialties          = specialties,
+        odds_ratio           = odds_ratio,
+        target_arl           = target_arl
+      )
+    )
+
+    rendered_pdf <- "nsqip_cusum_summary.pdf"
+    if (!file.exists(rendered_pdf)) {
+      stop("quarto_render() produced no PDF")
+    }
+    if (!file.copy(rendered_pdf, out_file, overwrite = TRUE)) {
+      stop("could not copy the rendered PDF to ", out_file)
+    }
+    file.remove(rendered_pdf)
+    message("  \u2713 Success: ", out_file)
+    TRUE
+
+  }, error = function(e) {
+    message("  \u2717 ERROR: ", conditionMessage(e))
+    FALSE
+  })
+
+  .record_render(label, "summary", ok)
+  invisible(ok)
+}
+
 
 # ---- Render specialty-level reports -----------------------------------------
 
@@ -283,9 +316,8 @@ if (length(empty_specs) > 0) {
 
 for (spec in setdiff(specialties, empty_specs)) {
   render_one(spec)
-  if (render_slides) {
-    render_slides_one(spec)
-  }
+  if (render_slides)  render_slides_one(spec)
+  if (render_summary) render_summary_one(spec)
 }
 
 # ---- Render division-level reports ------------------------------------------
@@ -322,9 +354,8 @@ if (has_mapping) {
                na.rm = TRUE)
       message("  (", div, ": ", n, " cases)")
       render_one(spec, div)
-      if (render_slides) {
-        render_slides_one(spec, div)
-      }
+      if (render_slides)  render_slides_one(spec, div)
+      if (render_summary) render_summary_one(spec, div)
     }
   }
 }

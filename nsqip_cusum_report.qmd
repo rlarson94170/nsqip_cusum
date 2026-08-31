@@ -33,7 +33,7 @@ params:
   benchmark_type: "site_expected"
   specialties: ["General Surgery", "Vascular", "Thoracic", "Plastics"]
   odds_ratio: 2.0
-  target_arl: 500
+  target_arl: 1500
 execute:
   echo: false
   warning: false

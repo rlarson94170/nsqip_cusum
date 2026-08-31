@@ -25,6 +25,7 @@ nsqip_cusum/
 ├── nsqip_cusum.Rproj          # RStudio project file
 ├── render_reports.R            # Master script — run this to generate all PDFs
 ├── nsqip_cusum_report.qmd     # Quarto report template (parameterized)
+├── nsqip_cusum_summary.qmd    # Quarto template for the 1–2 page exec summary
 ├── R/
 │   ├── version.R               # Release version — the one place it is defined
 │   ├── benchmarks.R            # SAR rates: national + site risk-adjusted
@@ -32,6 +33,7 @@ nsqip_cusum/
 │   ├── cusum_functions.R       # CUSUM computation, charts, O/E trends
 │   ├── triage.R                # Chart-review tiering + carry-over tracking
 │   ├── load_report_data.R      # Shared input loading + on-disk cache
+│   ├── output_names.R          # Output filename stems — shared by all renderers
 │   └── render_beamer_slides.R  # Direct R → LaTeX slide deck generator
 ├── data/                       # Your data files go here (not tracked by git)
 │   ├── Case_Details_Report.xlsx
@@ -119,6 +121,7 @@ All settings are in the top section of `render_reports.R`:
 | `odds_ratio` | `2.0` | Detection target: p₁ = OR × p₀ |
 | `target_arl` | `1500` | CUSUM in-control ARL, in cases — see Triage below |
 | `render_slides` | `TRUE` | Also produce beamer slide decks |
+| `render_summary` | `TRUE` | Also produce the 1–2 page executive summary handout |
 
 
 ## Output
@@ -136,10 +139,12 @@ unnoticed.
 **For each specialty** (e.g., General Surgery, Vascular, Thoracic, Plastics):
 - `NSQIP_CUSUM_{specialty}_{date}.pdf` — full PDF report
 - `NSQIP_CUSUM_{specialty}_{date}_slides.pdf` — beamer slide deck
+- `NSQIP_CUSUM_{specialty}_{date}_summary.pdf` — 1–2 page executive summary
 
 **For each division** within specialties listed in `division_specialties`:
 - `NSQIP_CUSUM_{specialty}_{division}_{date}.pdf` — division PDF report
 - `NSQIP_CUSUM_{specialty}_{division}_{date}_slides.pdf` — division slide deck
+- `NSQIP_CUSUM_{specialty}_{division}_{date}_summary.pdf` — division summary
 
 Divisions are auto-discovered from the surgeon mapping file. Only divisions
 meeting the `min_division_cases` threshold are rendered.
@@ -222,6 +227,56 @@ readmission was related to the index procedure.
 
 ### Appendix: Case Mix
 ASA class distribution and monthly case volume chart.
+
+
+## Executive Summary Handout
+
+A 1–2 page distillation of the report for division leadership, generated
+alongside the full PDF and the deck. It is a selection and layout layer, not a
+second analysis: every number comes from the same `build_triage()`,
+`build_flag_procedures()` and `build_flag_caselist()` calls against the same
+cached input bundle. If a number differs between the summary and the full
+report, that is a bug rather than a difference of method.
+
+Page 1 is the finding, page 2 is the pull sheet:
+
+| Section | Content |
+|---------|---------|
+| **Bottom line** | One line: how many complications need review, or that none did |
+| **The worklist** | Tier, complication, Obs/Exp, O/E, p, CUSUM, and New vs Carried over. Tier 1 rows in bold |
+| Composite-overlap note | Where one flag is explained by another — "one chart review, not two" |
+| **Where the events sit** | Top CPTs per flagged complication with the rest-of-service rollup |
+| **What this report could have detected** | The detection floor, so "nothing flagged" reads correctly |
+| **Cases to pull** | Every case carrying a flagged complication (page 2) |
+
+What it deliberately leaves out: CUSUM charts, prior SAR performance, the
+monthly dashboard, O/E trends, procedure mix, and the full complication case
+list. Those are what the full report is for, and the summary's footer names
+the accompanying file.
+
+**Two divergences from the full report's appendix**, both so the page
+reconciles with itself:
+
+- **Flagged complications only.** A summary reproducing every occurrence would
+  just be the appendix again.
+- **The whole report window, not the trailing three months.** The flag was
+  computed over the whole window, so "13 SSIs" above a seven-row table is a
+  discrepancy the reader should not have to resolve. `build_flag_caselist()`
+  matches cases on the triage row's own `var` — the same column
+  `build_triage()` counted — so the row count reconciles with the Obs column
+  by construction, and a test enforces it.
+
+A composite that adds no patients over the flag explaining it is dropped from
+both the procedure breakdown and the case list, on the same rule the full
+report uses. Without it, Plastics 2026-H1 would list its 13 SSI cases twice —
+once under SSI and once under Morbidity.
+
+**Most scopes flag nothing**, and that is the common output rather than the
+edge case: in 2026-H1, six of nine scopes were clean, including all five
+General Surgery divisions. Those get a single page that says so and then
+prints the detection floor, because "no flags" at 12 Transplant cases means
+something very different from "no flags" at 742. Set `render_summary <- FALSE`
+in `render_reports.R` to skip.
 
 
 ## Slide Decks
@@ -336,9 +391,9 @@ signalling on about two events, because only three are expected in that span.
 **Choosing `target_arl` with multiplicity in mind.** The ARL is per chart, and
 a full run produces many charts (currently ~66 across General Surgery and its
 divisions). Expected false alarms per reporting cycle is approximately the
-total cases monitored divided by `target_arl`. At the default 500 that is
-roughly 20 per cycle; at 1500 it is roughly 5. Set it for the number of charts
-you actually review, not for a single chart in isolation.
+total cases monitored divided by `target_arl`. At 500 that is roughly 20 per
+cycle; at the default 1500 it is roughly 5. Set it for the number of charts you
+actually review, not for a single chart in isolation.
 
 ### Case-Level (Procedure-Matched) Benchmarks
 
@@ -471,8 +526,8 @@ meaningful comparison.
 
 ### Change detection sensitivity
 - `odds_ratio` (default 2.0): Lower → more sensitive; Higher → fewer false alarms
-- `target_arl` (default 500): Lower → quicker detection but more false alarms.
-  Now genuinely honoured — h is re-simulated for the value you set.
+- `target_arl` (default 1500): Lower → quicker detection but more false alarms.
+  Genuinely honoured — h is re-simulated for the value you set.
 
 ### Add specialties
 Add to the `specialties` vector in `render_reports.R` and add corresponding
@@ -506,6 +561,35 @@ Set `render_slides <- FALSE` in `render_reports.R`.
 
 
 ## Version History
+
+### v1.5.2 — August 2026
+
+A distillation release. Nothing about the analysis changes — tiering, gates and
+boundaries are untouched, so reports remain directly comparable to v1.5.1. What
+changes is that each scope now also gets a handout short enough that division
+leadership will actually read it.
+
+- **Executive summary handout.** A 1–2 page per-scope distillation rendered
+  alongside the full report and the deck — worklist, procedure concentration,
+  detection floor, and the cases behind each flag. New template
+  (`nsqip_cusum_summary.qmd`) and one new function
+  (`build_flag_caselist()` in `R/triage.R`); no change to what flags, so
+  reports remain comparable. See **Executive Summary Handout** above.
+- Output filename construction is now one shared `scope_base_name()` in
+  `R/output_names.R` rather than a copy in each renderer. It lives in `R/`
+  rather than in `render_reports.R` because the summary's footer names the
+  accompanying report file, and Quarto renders in a separate process — a copy
+  in the template would be a copy that drifts, and the failure mode is a
+  handout pointing at a filename that does not exist. The two case-list display
+  formatters (`format_surgeon_name()`, `format_asa_class()`) are likewise now
+  top-level in `R/data_processing.R` instead of local to the appendix builder.
+- Fixed: `nsqip_cusum_report.qmd`'s own default `target_arl` was still 500,
+  stale since v1.5.0 moved the configured value to 1500. `render_reports.R`
+  passes the value explicitly, so no generated report was ever affected — but
+  knitting the template directly from RStudio used 500 while the summary used
+  1500, which would have put two documents that claim to agree in genuine
+  disagreement. Both templates now default to 1500.
+- 33 tests added covering the flagged-complication case list.
 
 ### v1.5.1 — August 2026
 

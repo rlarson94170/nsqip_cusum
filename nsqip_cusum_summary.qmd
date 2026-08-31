@@ -1,0 +1,307 @@
+---
+subtitle: ""
+format:
+  pdf:
+    toc: false
+    number-sections: false
+    geometry:
+      - margin=0.7in
+      - top=0.9in
+    fontsize: 9pt
+    header-includes:
+      - \usepackage{fancyhdr}
+      - \pagestyle{fancy}
+      - \fancyhf{}
+      - \fancyhead[L]{\small NSQIP CUSUM — Executive Summary}
+      - \fancyhead[R]{\small\thepage}
+      - \renewcommand{\headrulewidth}{0.4pt}
+      - \usepackage{float}
+      - \usepackage{longtable}
+      - \usepackage{needspace}
+      - \floatplacement{figure}{H}
+      - \usepackage{colortbl}
+      - \definecolor{sigred}{HTML}{CB181D}
+      - \definecolor{okgreen}{HTML}{238B45}
+      - \setlength{\parskip}{4pt}
+      - \setlength{\parindent}{0pt}
+params:
+  specialty: "General Surgery"
+  division: ""
+  # A prefix, not an exact name — see resolve_case_file() in R/data_processing.R
+  data_file: "data/Case_Details_Report.xlsx"
+  site_sar_file: "data/SAR_Site_Summary.xlsx"
+  surgeon_mapping_file: "data/surgeon_division_mapping.csv"
+  benchmark_type: "site_expected"
+  specialties: ["General Surgery", "Vascular", "Thoracic", "Plastics"]
+  odds_ratio: 2.0
+  target_arl: 1500
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+
+# The executive summary is a selection and layout layer over the full report.
+# It computes nothing the full report does not already compute — every number
+# here comes from the same build_triage() / build_flag_procedures() /
+# build_flag_caselist() calls, against the same cached input bundle. If a
+# number differs between the two documents, that is a bug, not a difference of
+# method.
+
+source("R/version.R")
+source("R/benchmarks.R")
+source("R/data_processing.R")
+source("R/cusum_functions.R")
+source("R/triage.R")
+source("R/load_report_data.R")
+source("R/output_names.R")
+
+library(knitr)
+library(kableExtra)
+
+options(readxl.show_progress = FALSE)
+```
+
+```{r load-data}
+#| include: false
+
+bundle <- load_report_data(
+  data_file            = params$data_file,
+  site_sar_file        = params$site_sar_file,
+  surgeon_mapping_file = params$surgeon_mapping_file,
+  benchmark_type       = params$benchmark_type,
+  specialties          = unlist(params$specialties)
+)
+
+case_data       <- bundle$case_data
+benchmark_rates <- bundle$benchmark_rates
+targeted_p0     <- targeted_for_mode(bundle, params$benchmark_type)
+
+spec <- params$specialty
+div  <- if (nchar(params$division) > 0) params$division else NULL
+
+spec_data <- case_data |> filter(specialty == spec)
+if (!is.null(div)) spec_data <- spec_data |> filter(division == div)
+
+n_cases  <- nrow(spec_data)
+date_min <- min(spec_data$op_date, na.rm = TRUE)
+date_max <- max(spec_data$op_date, na.rm = TRUE)
+
+report_name <- if (!is.null(div)) paste0(spec, " — ", div) else spec
+
+bench_desc <- if (params$benchmark_type == "site_expected" &&
+                  bundle$site_sar_available) {
+  "site risk-adjusted expected rates (SAR/ISAR)"
+} else {
+  "national observed rates (SAR)"
+}
+```
+
+```{r triage-core}
+#| include: false
+
+triage <- build_triage(
+  data            = case_data,
+  spec            = spec,
+  div             = div,
+  benchmark_rates = benchmark_rates,
+  targeted_rates  = targeted_p0,
+  odds_ratio      = params$odds_ratio,
+  target_arl      = params$target_arl
+)
+triage <- annotate_carryover(triage, spec, div)
+triage <- annotate_composite_overlap(triage, case_data, spec, div)
+
+flagged <- if (!is.null(triage)) triage |> filter(tier > 0) else NULL
+n_flags <- if (is.null(flagged)) 0L else nrow(flagged)
+
+# The detection floor is what makes "nothing flagged" readable, and for most
+# scopes it is the substance of the page. Built here rather than at the point
+# of printing so the bottom-line text can promise it only when it exists.
+floor_tbl <- if (is.null(triage)) NULL else {
+  triage |>
+    filter(!is.na(need_events)) |>
+    arrange(desc(fold)) |>
+    transmute(
+      Complication     = complication,
+      Exp              = expected,
+      Obs              = observed,
+      `Events to flag` = need_events,
+      `= fold excess`  = fold
+    )
+}
+has_floor <- !is.null(floor_tbl) && nrow(floor_tbl) > 0
+```
+
+\vspace{-2.5em}
+
+## `r report_name` {.unnumbered}
+
+**Chart review summary** · `r format(date_min, "%d %b %Y")` – `r format(date_max, "%d %b %Y")` · `r n_cases` cases · benchmark: `r bench_desc`
+
+\vspace{-0.4em}
+\hrulefill
+
+```{r bottom-line}
+#| results: asis
+
+if (n_flags == 0) {
+  cat("### Bottom line: nothing met the review threshold\n\n")
+  cat("No complication was elevated enough, or clustered recently enough, to",
+      "warrant pulling charts this period.\n\n")
+  cat("**Read this as \"nothing above the detection floor\", not as \"nothing",
+      "to see\".** With", n_cases, "cases in this window some complications",
+      "are too rare to flag at any plausible rate",
+      if (has_floor) "— the table below shows what each one would have needed."
+      else "regardless of performance.",
+      "\n\n")
+} else {
+  n_t1 <- sum(flagged$tier == 1)
+  cat("### Bottom line: ", n_flags, " complication",
+      if (n_flags > 1) "s" else "", " on the worklist\n\n", sep = "")
+  cat("The worklist is below, with the procedures and the cases behind it.",
+      if (n_t1 > 0) {
+        paste0("Start with the ", n_t1, " Tier 1 item",
+               if (n_t1 > 1) "s" else "",
+               ": rate elevated *and* events clustered recently.")
+      } else {
+        "Nothing reached Tier 1 — no flag has both an elevated rate and a recent cluster."
+      },
+      "\n\n")
+}
+```
+
+```{r worklist}
+#| results: asis
+
+if (n_flags > 0) {
+  cat("### The worklist\n\n")
+
+  tbl <- flagged |>
+    transmute(
+      Priority     = tier_label,
+      Complication = complication,
+      Obs          = observed,
+      Exp          = expected,
+      `O/E`        = oe,
+      `p`          = p_value,
+      CUSUM        = ifelse(cusum_signal, "yes", "--"),
+      Status       = status
+    )
+
+  k <- kable(tbl, format = "latex", booktabs = TRUE, linesep = "",
+             align = "llrrrrcl") |>
+    kable_styling(latex_options = c("hold_position"), font_size = 8)
+  t1 <- which(flagged$tier == 1)
+  if (length(t1) > 0) k <- k |> row_spec(t1, bold = TRUE)
+  print(k)
+  cat("\n")
+
+  cat("\\footnotesize A complication is listed when its cumulative rate is",
+      "elevated (at least", TRIAGE_MIN_EVENTS, "events and one-sided",
+      paste0("$p < ", TRIAGE_ALPHA, "$"),
+      "against expected) or the CUSUM shows recent clustering.",
+      "Clustering with observed at or below expected is not listed.",
+      "\\normalsize\n\n")
+
+  # Where two flags are one problem. Load-bearing: without it a division opens
+  # two chart reviews on the same patients.
+  notes <- flagged |> filter(!is.na(overlap_note))
+  if (nrow(notes) > 0) {
+    for (i in seq_len(nrow(notes))) {
+      cat("- **", notes$complication[i], ":** ", notes$overlap_note[i],
+          "\n", sep = "")
+    }
+    cat("\n")
+  }
+}
+```
+
+```{r where-events-sit}
+#| results: asis
+
+proc_break <- build_flag_procedures(case_data, spec, div, triage)
+
+if (!is.null(proc_break) && nrow(proc_break) > 0) {
+  # A composite adding no patients would repeat the explaining flag's table
+  # verbatim, which reads as a second finding.
+  redundant <- if ("overlap_full" %in% names(triage)) {
+    triage$complication[which(triage$overlap_full)]
+  } else character(0)
+  proc_break <- proc_break |> filter(!(complication %in% redundant))
+}
+
+if (!is.null(proc_break) && nrow(proc_break) > 0) {
+  cat("### Where the events sit\n\n")
+  cat("Ranked by event count, not rate. The rollup row is the comparison —",
+      "a procedure only stands out against the rest of the service.\n\n")
+
+  for (comp in unique(proc_break$complication)) {
+    sub <- proc_break |> filter(complication == comp)
+    ptbl <- sub |>
+      transmute(CPT = cpt, Procedure = description,
+                Events = events, Cases = cases, `Rate %` = rate_pct)
+    cat("**", comp, " — events by procedure**\n\n", sep = "")
+    k <- kable(ptbl, format = "latex", booktabs = TRUE, linesep = "",
+               align = "llrrr") |>
+      kable_styling(latex_options = c("hold_position"), font_size = 8)
+    other_row <- which(sub$is_other)
+    if (length(other_row) > 0) k <- k |> row_spec(other_row, italic = TRUE)
+    print(k)
+    cat("\n")
+  }
+}
+```
+
+```{r detection-floor}
+#| results: asis
+
+if (has_floor) {
+  cat("### What this report could have detected\n\n")
+  cat("What each complication would have needed to flag, given", n_cases,
+      "cases. A high fold value means absence of a flag says little.\n\n")
+  print(
+    kable(floor_tbl, format = "latex", booktabs = TRUE, linesep = "",
+          align = "lrrrr") |>
+    kable_styling(latex_options = c("hold_position"), font_size = 7)
+  )
+  cat("\n")
+}
+```
+
+```{r cases-to-pull}
+#| results: asis
+
+caselist <- build_flag_caselist(case_data, spec, div, triage)
+
+if (!is.null(caselist) && nrow(caselist) > 0) {
+  cat("\\needspace{9\\baselineskip}\n\n")
+  cat("### Cases to pull\n\n")
+  cat("Every case carrying a flagged complication, across the full report",
+      "window, so the count reconciles with the Obs column above. PATOS",
+      "(present at time of surgery) events are excluded.\n\n")
+
+  kable(caselist, format = "latex", booktabs = TRUE, linesep = "",
+        align = c("l", "l", "l", "l", "c", "r", "l"),
+        longtable = TRUE) |>
+    kable_styling(latex_options = "hold_position", font_size = 7) |>
+    print()
+  cat("\n")
+}
+```
+
+\vspace{0.4em}
+\hrulefill
+
+\footnotesize
+**This is a summary.** CUSUM charts, prior SAR performance, the monthly
+complication dashboard, procedure mix and the full complication case list are
+in the accompanying report,
+`r latex_escape_filename(paste0(scope_base_name(spec, params$division), ".pdf"))`.
+No number here is computed differently from the full report.
+
+Generated `r format(Sys.time(), "%Y-%m-%d %H:%M")` · `r nsqip_version_label()``r if (!is.null(div)) paste0(" · Division: ", div)`
+\normalsize

@@ -13,9 +13,13 @@ output/*.pdf
 output/*.csv
 # Cached report data — derived from data/, so treat as PHI-bearing
 .cache/
-# Data files (contain PHI — do not commit)
-data/*.xlsx
-data/*.csv
+# Data files (contain PHI — do not commit). The whole directory is ignored
+# rather than a list of extensions: the previous xlsx/csv list left anything
+# else dropped in data/ — a .rtf, .docx, a stray PDF — committable by default.
+# .gitkeep stays tracked so a fresh clone still has the folder the README tells
+# you to put files in; nothing in the code creates it.
+data/*
+!data/.gitkeep
 # OS files
 .DS_Store
 Thumbs.db

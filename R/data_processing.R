@@ -617,6 +617,32 @@ observed_rates_summary <- function(data, spec, div = NULL) {
 }
 
 
+#' Format a surgeon name for display: "LASTNAME,FIRST (12345)" -> "Lastname, First"
+#'
+#' Top-level rather than local because the executive summary's case list
+#' formats the same column and a second copy would be a second thing to keep
+#' in step.
+format_surgeon_name <- function(s) {
+  s <- gsub("\\s*\\(\\d+\\)$", "", s)
+  parts <- strsplit(s, ",")[[1]]
+  if (length(parts) == 2) {
+    last  <- paste0(toupper(substr(trimws(parts[1]), 1, 1)),
+                    tolower(substr(trimws(parts[1]), 2, nchar(trimws(parts[1])))))
+    first <- paste0(toupper(substr(trimws(parts[2]), 1, 1)),
+                    tolower(substr(trimws(parts[2]), 2, nchar(trimws(parts[2])))))
+    paste0(last, ", ", first)
+  } else {
+    s
+  }
+}
+
+#' Reduce an ASA class string to its roman numeral
+format_asa_class <- function(a) {
+  m <- regmatches(a, regexpr("[IV]+", a))
+  if (length(m) > 0) m else a
+}
+
+
 #' Build a case-level complication list for the appendix
 #'
 #' Returns one row per case that had at least one complication (excluding
@@ -691,33 +717,10 @@ build_complication_caselist <- function(data, spec, div = NULL, months = 3) {
   
   if (nrow(df) == 0) return(NULL)
   
-  # Format surgeon name: "LAST, First" without ID number
-  format_surgeon <- function(s) {
-    # Remove parenthetical ID: "LASTNAME,FIRST (12345)" -> "LASTNAME,FIRST"
-    s <- gsub("\\s*\\(\\d+\\)$", "", s)
-    # Title case: "LASTNAME,FIRST" -> "Lastname, First"
-    parts <- strsplit(s, ",")[[1]]
-    if (length(parts) == 2) {
-      last  <- paste0(toupper(substr(trimws(parts[1]), 1, 1)),
-                      tolower(substr(trimws(parts[1]), 2, nchar(trimws(parts[1])))))
-      first <- paste0(toupper(substr(trimws(parts[2]), 1, 1)),
-                      tolower(substr(trimws(parts[2]), 2, nchar(trimws(parts[2])))))
-      paste0(last, ", ", first)
-    } else {
-      s
-    }
-  }
-  
-  # Format ASA: extract just the class number
-  format_asa <- function(a) {
-    m <- regmatches(a, regexpr("[IV]+", a))
-    if (length(m) > 0) m else a
-  }
-  
   result <- df |>
     mutate(
-      surgeon_short = sapply(surgeon, format_surgeon),
-      asa_short     = sapply(asa_class, format_asa)
+      surgeon_short = sapply(surgeon, format_surgeon_name),
+      asa_short     = sapply(asa_class, format_asa_class)
     ) |>
     arrange(op_date) |>
     transmute(
